@@ -534,6 +534,11 @@ Plan B facts: tertiary MI2S rx-lines 0x01 → **SD0 gpio55 = playback data to th
 tx-lines 0x02 → SD1 gpio56 = IV sense from the amps; SCK gpio53, WS gpio54 (msm master).
 TAS2562 TDM_CFG0 (0x06) reset 0x09 = 48 kHz, frame start; SAMP_RATE 000 = 8 kHz exists.
 Step A4: TLMM write timing + amp regs 0x00-0x0f.
+**A4 result (2026-10-24 00:03, `evidence/2026-10-24-audioA4.jpg`):** the printed ns/op is
+1000x too big (formula bug: value/1000 = ns): **TLMM write ≈ 40 ns (posted), read ≈ 547 ns**.
+A CPU-generated I2S at 8 kHz (256 kHz BCLK, a few writes per bit) is well within reach.
+Amp regs 0x00-0x0f, both: `00 00 0e 20 c6 22 09 02 0a 10 13 02 00 04 05 06` (0x4d has
+0x8e at 0x02). Matches TAS2562 defaults (TDM_CFG0 0x09 = 48 kHz).
 
 ## Open questions (in order)
 

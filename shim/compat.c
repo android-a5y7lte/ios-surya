@@ -9,3 +9,13 @@ int strcmp(const char *a, const char *b)
 	}
 	return (unsigned char)*a - (unsigned char)*b;
 }
+
+/* clang emits memset for zero-initialised local arrays (surya_touch.c). */
+void *memset(void *d, int c, unsigned long n);
+void *memset(void *d, int c, unsigned long n)
+{
+	volatile unsigned char *p = d;	/* volatile: keep clang from calling memset here */
+	while (n--)
+		*p++ = (unsigned char)c;
+	return d;
+}

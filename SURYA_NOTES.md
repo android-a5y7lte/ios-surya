@@ -257,7 +257,22 @@ Steps:
   runs on the no-payload path before the UFS probe. GCC: vote `0x5200c` bits 6–10,
   CBCRs `0x17004/08/0c/14/30` (from `drivers/clk/qcom/gcc-sm7150.c`); skips SE reads if
   the QUP0 AHB clocks report CLK_OFF.
+  **Result 2026-10-23 17:24** (`evidence/2026-10-23-touch-3a-spi-probe.jpg`):
+  GCC vote `0x5200c=0x41000000` (APPS votes none of QUP0 bits 6–10); CBCRs m_ahb=0,
+  s_ahb=0, core=0x4220, core2x=0x4220 (all running, voted by someone else), **SE0 CBCR
+  0x80004220 = CLK_OFF** (SE clock gated); QUP0 hw_ver 0x20000000 (v2.0 → SPI
+  oversampling 1); **SE0 FW revision 0x101 → protocol 1 = SPI, firmware loaded**;
+  status 0, if_dis 0, m_clk_cfg 0x11, clk_sel 0, cpha/cpol 0, word_len 0 (unconfigured),
+  demux 3, DMA off, FIFOs empty, HW_PARAM 0x20102964 / 0x20104800. Userdata fs "other"
+  (HFS iOS root intact). ⇒ Need: vote SE0 clock + set RCG, configure SPI regs; no
+  firmware load for the SE.
 - 3b SPI chip-ID read from the shim (first IC transaction; reads only).
+  Implemented (`SURYA_TOUCH_STEP=2 shim/build-surya.sh`): GCC vote |= bits 6–10, SE0 RCG
+  `0x17034` → XO/1 19.2 MHz (or stop if DFS level 0 isn't XO), TLMM gpio49–52 (west tile
+  `0x3500000`) func 2 = qup00, 6 mA; SE0 FIFO mode, mode 0, CS0, 8-bit, clk div 4
+  (4.8 MHz), packing 0x7f8fe/0xffefe (geni_se_config_packing 8/4/MSB); full-duplex
+  M_CMD 3. Reads: chip ID at `0x1F64E` (6 bytes after cmd+dummy), fw state at
+  `0x22D00|0x60`. No IC writes besides page-select frames.
 - 3c firmware download from the shim (blob in the ramdisk) → event-buffer polling,
   print touches on screen.
 - 3d port into XNU as `sweet_touch` Novatek path; firmware shipped in the root image

@@ -391,6 +391,10 @@ void shim_main(uint64_t dtb)
 	stage = "touch";
 	surya_touch_probe();
 	con_skip();
+#if defined(SURYA_TOUCH_STEP) && SURYA_TOUCH_STEP >= 2
+	surya_touch_spi_test();
+	con_skip();
+#endif
 #endif
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";

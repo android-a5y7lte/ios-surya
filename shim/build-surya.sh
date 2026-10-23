@@ -15,7 +15,7 @@ DTB=../dtb/surya/surya-boot.dtb
 [ -f "$DTB" ] || { echo "error: $DTB missing (see SURYA_NOTES.md)" >&2; exit 1; }
 CC="clang --target=aarch64-linux-gnu"
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -fno-jump-tables -fno-builtin-strcmp \
- -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DSURYA_TOUCH_PROBE"
+ -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DSURYA_TOUCH_PROBE -DSURYA_TOUCH_STEP=${SURYA_TOUCH_STEP:-1}"
 OBJS="start shim console mmu fdt loader ufs compat surya_touch"
 mkdir -p out/surya
 for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c compat.c surya_touch.c; do

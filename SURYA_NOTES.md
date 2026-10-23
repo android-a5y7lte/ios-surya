@@ -15,6 +15,9 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23** — Test 1 done: live DT + iomem read from the phone under
+  Ubuntu Touch (read-only). Board layer matches sweet except touch (see table).
+
 - **2026-10-22** — Feasibility check done (read-only, nothing built, nothing
   run on the phone). Verdict: realistic. The SoC core is shared with sweet; the
   board layer must change, and the touch driver is the main new work.
@@ -32,7 +35,37 @@ reference. **This file is the handoff for the surya port.**
 - Go one step at a time; record observed results here and keep them separate
   from guesses.
 
-## Verified: sweet vs surya
+## Live hardware map (2026-10-23, from this phone)
+
+Source: `/sys/firmware/fdt` and `/proc/iomem` read under Ubuntu Touch (Halium
+kernel, ABL-provided DT). The dump itself stays out of git (it contains the
+serial number); only values are recorded here.
+
+| Item | Surya value (observed) | Same as sweet? |
+| --- | --- | --- |
+| Board | `qcom,msm-id = <0x16d 0>`, `qcom,board-id = <0x22 0>`, `hwname=surya` | — |
+| RAM (`/memory`) | `0x80000000` + 2 GiB, `0x1_00000000` + `0xfcc00000` | Yes |
+| Upper bank | iomem: System RAM `a1600000-1fcbfffff`, no carve-outs above 4 GiB | Yes (`--highmem` range fits) |
+| Low carve-outs | `0x85700000` … `0x9f800000+0x1e00000` (all below `0xb0000000`) | Same layout pattern |
+| Splash framebuffer | `cont_splash_region@9c000000`, size `0x1800000` | Same address (sweet `FB_SIZE` 0x1700000 fits) |
+| Active panel | `msm_drm.dsi_display0=dsi_nt36672c_huaxing_fhd_video_display` | Different panel |
+| Panel mode | `dsi_video_mode`, DSC v1.1, 1080×2400 (`0x438`×`0x960`), 120 Hz, panel bpp 24 | Video + DSC like sweet; size same |
+| GIC | GICD `0x17a00000`/0x10000, GICR `0x17a60000`/0x100000, stride 0x20000 | Yes |
+| Timer | `arm,armv8-timer`, PPIs 1/2/3/0, 19.2 MHz (`0x124f800`) → vtimer INTID 19 | Yes |
+| CPUs | 8 cores, MPIDR `0x000`…`0x700` | Yes |
+| PS_HOLD | `restart@c264000` | Yes (`shim/shim.c` PSHOLD) |
+| Restart reason | `qcom,msm-imem@146aa000` + `restart_reason@65c` → `0x146aa65c` | Yes |
+| UFS | `ufshc@1d84000`, `androidboot.bootdevice=1d84000.ufshc` | Yes |
+| Power key | PM6150 PON (`kpdpwr`/`resin`) | Yes |
+| Volume up | `gpio-keys` → PM6150L (SID 4) GPIO 2, code 115 | Yes (sweet patch 0060 reads the same block) |
+| Touch | `spi@0x880000` (`qcom,spi-geni`, QUP0 SE0, IRQ SPI 0x259) → `novatek,NVT-ts-spi` @CS0, 8 MHz, reset GPIO 8, irq GPIO 9; supplies vddio + LAB/IBB (in-cell, shared with panel) | **No** (sweet: Goodix I²C) |
+| Debug UART | `earlycon=msm_geni_serial,0x4a90000` in cmdline | Unknown if reachable (test pads) |
+
+Takeaway: apart from touch, every address the shim, `mkadt.py` and patch 0060
+hard-code matches surya. Still unknown: splash pixel format/stride (sweet:
+a8r8g8b8, stride 4320) and the stock `boot.img` header — both checked next.
+
+## Verified: sweet vs surya (mainline DT)
 
 Sources: ios-sweet tree at fork time, and
 [sm7150-mainline/linux](https://github.com/sm7150-mainline/linux) commit
@@ -51,8 +84,9 @@ Sources: ios-sweet tree at fork time, and
 
 ## Open questions (in order)
 
-1. Live DT of *this* phone: framebuffer address, memory map, reserved carve-outs.
-2. Does ABL leave the Huaxing panel running in video mode (no kick needed)?
+1. ~~Live DT of this phone~~ — done 2026-10-23, see above.
+2. ~~Does ABL leave the panel in video mode?~~ — DT says video mode + cont-splash; confirm on screen with the shim.
+2b. Splash pixel format and stride.
 3. Is the `spi0` serial engine already loaded in SPI mode at handoff (as sweet
    relied on ABL-loaded I²C firmware)?
 4. Does the Novatek touch IC need host-uploaded firmware before it reports touches?
@@ -74,4 +108,6 @@ Sources: ios-sweet tree at fork time, and
 
 ## Next action
 
-Step 1: get the live device tree from the phone (owner runs it; waiting).
+Test 2: read-only backup of `persist`, `modemst1/2`, `fsg`, `fsc`, `boot`,
+`dtbo`, `vbmeta` from Ubuntu Touch, and get the `boot.img` header + DTB for
+`shim/build.sh`.

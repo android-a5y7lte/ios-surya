@@ -422,6 +422,14 @@ poster at all** (no selected lock-screen poster). Likely real root cause: no pos
 extension (Collections/Photos/Emoji/Gradient/…) delivered descriptors, so the first-time
 setup builds an empty configuration (and the early lazy build was probably harmless).
 Next: which extension/daemon processes run (ExtensionKit / pkd / poster extensions).
+Checked (test 7 log + image): poster extensions are on the image (CollectionsPoster in
+WallpaperKit, Emoji/Gradient/Pride/Unity/PhotosPosterProvider/Extragalactic/AegirPoster,
+PaperBoard's LegacyPoster) but **none of them is ever exec'd**; `pkd` and `lsd` do run.
+Upstream sweet has no wallpaper either. So PosterBoard's extension discovery returns no
+provider (or it never asks before building the configuration). Without PosterBoard's
+os_log output this is guesswork; parked for now (patch stays, harmless). Ideas for later:
+route PosterBoard's os_log to the console (OS_ACTIVITY_DT_MODE / a libtrace hook), or
+check the LaunchServices/ExtensionKit registration of `com.apple.posterkit.provider`.
 
 ## Backlight plan (research 2026-10-23)
 

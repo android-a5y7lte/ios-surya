@@ -16,9 +16,9 @@
 # read-only and tries to mount it as the HFS root (expected to fail on the
 # current ext4 userdata -> root mount panic). Still no ufsrw: the driver
 # returns EROFS for every write.
-# CPUS=N (env, default 1) sets cpus=N; cores 0-5 are the Cortex-A55s (MPIDR
+# CPUS=N (env, default 6 since 2026-10-23: tested on surya) sets cpus=N; cores 0-5 are the Cortex-A55s (MPIDR
 # 0x000-0x500 on surya, same as sweet), so CPUS=6 matches upstream's setting.
-# A non-default CPUS adds "-cpuN" to the output name.
+# CPUS other than 1 adds "-cpuN" to the output name (CPUS=1 is the safe fallback).
 # Needs: python3, clang, lld, llvm (llvm-objcopy/readelf/nm), and
 #        dtb/surya/surya-boot.dtb (this phone's boot.img DTB, gitignored).
 # Output: shim/out/shim-boot-surya-test4.img  -> fastboot boot it (nothing flashed).
@@ -30,7 +30,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 KERNEL=${1:?usage: tools/surya-test4.sh KERNEL [4b]}
 VARIANT=${2:-4}
-CPUS=${CPUS:-1}
+CPUS=${CPUS:-6}
 case "$CPUS" in [1-8]) ;; *) echo "error: CPUS must be 1..8" >&2; exit 1 ;; esac
 NAME=test$VARIANT; [ "$CPUS" = 1 ] || NAME=$NAME-cpu$CPUS
 case "$VARIANT" in

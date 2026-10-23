@@ -82,6 +82,21 @@ Sources: ios-sweet tree at fork time, and
 | Buttons | PMIC PON + volume via SPMI (`0060` patch) | PM6150/PM6150L; `KYPD_VOLP_N` on pm6150l gpio2 | Probably small; verify volume wiring |
 | RAM | upper bank `0x100000000` + `0xfcc00000` (`tools/mkadt.py --highmem`) | Unknown for this unit | Read memory + reserved-memory from live DT |
 
+## Build (surya)
+
+- `shim/build-surya.sh` builds the shim with clang/lld (`--target=aarch64-linux-gnu`,
+  plus `-fno-jump-tables`, `-fno-builtin-strcmp` and `shim/compat.c` so the
+  no-absolute-relocation rule still holds) and packs it with
+  `tools/mkbootimg_v2.py` (pure-Python boot.img v2). Output:
+  `shim/out/shim-boot-surya.img`. Tested: boot.img round-trips through
+  `tools/unpack_bootv2.py` with the kernel byte-identical.
+- Stock surya boot header (owner's `boot` partition, 2026-10-23): v2, page 4096,
+  kernel 0x8000, ramdisk 0x1000000, tags 0x100, dtb 0x1f00000, dtb size 0x612f7
+  at file offset 0x145f000 — identical offsets to sweet's `shim/build.sh`.
+- Needs `dtb/surya/surya-boot.dtb` (the DTB section of that boot.img; gitignored).
+- Test 2 done 2026-10-23: owner holds read-only backups of persist, modemst1/2,
+  fsg, fsc, boot, dtbo, vbmeta, vbmeta_system with SHA256SUMS on his PC.
+
 ## Open questions (in order)
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.

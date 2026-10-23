@@ -15,6 +15,15 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 ~16:35 — 🎉 MILESTONE: iOS 16.7.16 LOCK SCREEN ON THE POCO X3 NFC (surya).**
+  Same Test 5 boot (cpus=1), roughly 15 min from `fastboot boot`. Photos:
+  `evidence/2026-10-23-test5-LOCKSCREEN-1.jpg`, `-2.jpg` (clock advances 4:16 → 4:17, so
+  SpringBoard/backboardd keep rendering), `-boot-10-console.jpg` (Skywalk/identityservices
+  console lines just before). Observed: "Wednesday, December 31" (no RTC → epoch date),
+  charging battery icon (static IOPMPowerSource), **iPhone X gesture layout** (home
+  indicator bar, camera button, no Home button → /product identity from d22ap.adt works),
+  CPU rendering on the Huaxing panel. Touch not expected (sweettouch=0).
+
 - **2026-10-23 16:20** — **Test 5: iOS userland boots on surya — Apple logo.**
   `fastboot -S 512M flash userdata ios16-root.simg` (24/24 OKAY, 377 s; owner approved
   the erase — Ubuntu Touch gone). ABL hung on the next `fastboot boot` ("Sending"),

@@ -389,6 +389,21 @@ first call in every process: most likely loaded at init from a switcher configur
 already on disk (shipped in the root image's /var, or written by the first run).
 Next (read-only, on the PC): loop-mount `ios16-root.img` (HFS+) read-only and look for
 PosterBoard / PosterBoardServices data under /private/var/mobile/Library.
+**Result:** the image has no PosterBoard data (only Weather's `WeatherPoster.appex` in
+/private/var/staged_system_apps), so nothing persisted. **Root cause found (static):**
+`-[PBFPosterExtensionDataStore _stateLock_switcherConfiguration]` (0x1c1778c10) is a lazy
+getter: `if (!self->_switcherConfiguration) self->_switcherConfiguration =
+[self _stateLock_buildSwitcherConfigurationWithContext:nil outMutated:nil];` and does NOT
+set +0xe9. Callers include the public `-switcherConfiguration` (XPC from SpringBoard),
+`_stateLock_activeConfiguration`, fetchPosterSnapshots, ingestPosterConfiguration,
+applyUpdates, canPersistNewPosterConfiguration, … So any of those running before the
+first `_stateLock_updateExtensions` pass builds the configuration, and the first-time setup
+then asserts. On our CPU-only boot the order evidently differs from a real iPhone.
+Fix candidate (needs approval, writes 4 bytes in userdata): NOP the entry check
+`cbnz x8, assert` at cache vaddr **0x1c1777ab4** (`28 36 00 b5` → `1f 20 03 d5`), so the
+first-time setup just rebuilds the configuration (it overwrites +0x98 and sets +0xe9).
+Reversible by writing the 4 original bytes back. Unknown: whether XNU checks shared-cache
+page hashes here (AMFI is permissive on this port).
 
 ## Backlight plan (research 2026-10-23)
 

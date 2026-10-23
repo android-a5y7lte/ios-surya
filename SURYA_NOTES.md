@@ -15,6 +15,19 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 15:48** — **Test 4b PASSED: kernel UFS driver reads userdata on surya.**
+  `tools/surya-test4.sh KERNEL 4b` (adds `rd=ufsroot0`, still no `ufsrw`), image SHA256
+  `8e68658a…938d`, `fastboot boot`. Photos: `evidence/2026-10-23-test4b-*.jpg`. Observed:
+  - `BSD root: ufsroot0, major 1, minor 0` → kernel UFS driver attached and exposed userdata.
+  - `hfs_ValidateHFSPlusVolumeHeader: unknown Volume Signature : e0`,
+    `hfs_mountfs returned error=22`, `cannot mount root, errno = 19`, `mount(N) failed`,
+    retried in a loop (N up to 13+) → HFS read the ext4 bytes at the volume-header offset
+    and rejected them. Expected: userdata is still Ubuntu Touch ext4.
+  - Bonus: `SWEET USB: DWC3 GEVNTADR ... GHWPARAMS0 0x4020400a`, `SWEET USB: QUSB2
+    PLL_STATUS 0x17171717 ...` → USB controller registers respond (relevant to the
+    optional USB live log, patches 0072–0077).
+  - No writes possible (driver EROFS without `ufsrw`); phone returned to Ubuntu Touch.
+
 - **2026-10-23 15:43** — **Test 4 PASSED: XNU boots on surya.** Image
   `shim/out/shim-boot-surya-test4.img` (SHA256 `a9f09650…f682`) built on the owner's
   PC with `tools/surya-test4.sh` from CI kernel `xnu #1` (unchanged upstream patches),
@@ -160,6 +173,10 @@ Sources: ios-sweet tree at fork time, and
 7. Everything else (Wi-Fi, audio, GPU, …) is unsupported, as on sweet.
 
 ## Next action
+
+Test 5 needs explicit owner approval (erases userdata = Ubuntu Touch).
+
+## Previous next action
 
 Test 2: read-only backup of `persist`, `modemst1/2`, `fsg`, `fsc`, `boot`,
 `dtbo`, `vbmeta` from Ubuntu Touch, and get the `boot.img` header + DTB for

@@ -15,6 +15,22 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 16:20** — **Test 5: iOS userland boots on surya — Apple logo.**
+  `fastboot -S 512M flash userdata ios16-root.simg` (24/24 OKAY, 377 s; owner approved
+  the erase — Ubuntu Touch gone). ABL hung on the next `fastboot boot` ("Sending"),
+  fixed by unplug + Power+VolDown ~15 s (same Xiaomi ABL quirk as sweet). Then
+  `fastboot boot shim/out/shim-boot-surya-test5.img` (SHA256 `450da8e9…38a5`).
+  Photos `evidence/2026-10-23-test5-boot-01..09.jpg`. Observed:
+  - Kernel as in Test 4, then HFS root from userdata, launchd and system daemons
+    (`exec` xpcproxy, budd, clipserviced, contactsd, bluetoothd, fairplayd.H2, geod,
+    powerd, lsd, nsurlsessiond, …), SWEET AKS selector traffic, Sandbox stand-in.
+  - backboardd: `open AppleCLCD`, `SWEET FB: backboardd sel 57/15/22/29/33/79 -> 0x0`,
+    `IODeviceTree:/product -> IOPlatformDevice` (iPhone X identity present),
+    `MobileGestaltHelper sel 0/28 -> 0x0`, `open SweetHIDTouch` / `SweetHIDButtons`.
+  - IOAcceleratorES matching -> 0 found (no GPU, expected: software rendering).
+  - `CRASH driverkitd reason ns 1 code 0x7` (not fatal; boot continued).
+  - Screen: **Apple logo** rendered by iOS on the Huaxing panel.
+
 - **2026-10-23 15:48** — **Test 4b PASSED: kernel UFS driver reads userdata on surya.**
   `tools/surya-test4.sh KERNEL 4b` (adds `rd=ufsroot0`, still no `ufsrw`), image SHA256
   `8e68658a…938d`, `fastboot boot`. Photos: `evidence/2026-10-23-test4b-*.jpg`. Observed:

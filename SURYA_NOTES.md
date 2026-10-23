@@ -483,6 +483,13 @@ CPU once it finds a backlight service. Patch **0084**: `sweetbl` is a bit mask
 recommended `sweetbl=1`. Slider: needs the real protocol (likely the D22 `/backlight`
 ADT node + whatever CoreBrightness reads) — later.
 
+**Test 9 (2026-10-23 ~23:40, kernel with 0084, `ARGS="sweetbattery=1 sweetbl=1"`):** smooth
+again and screen off is fully dark (owner: "it works"). Brightness slider in Control
+Center / Settings moves but the panel stays the same (expected: no path from iOS to
+SweetBacklight yet). The Control Center volume slider no longer reacts to dragging, but
+the hardware volume keys still change the level and show the HUD (no audio hardware
+anyway); probably a touch/gesture issue in that module, low priority.
+
 ## Open questions (in order)
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.

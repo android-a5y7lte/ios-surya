@@ -361,6 +361,16 @@ Assertion text is CFString `0x1e11644a0` (not yet read; a `grep -a` for
 `switcherConfigurationPath`, XPC entitlements `com.apple.posterboardservices.data-store.{access,mutate}SwitcherConfiguration`).
 Next: disassemble the caller in `_stateLock_updateExtensions:…` before +5308 to see
 what makes it call the first-time setup again.
+**Caller (0x1c177e2c4..0x1c177e308):** `if (!self->_e9) { [self
+_stateLock_setupSwitcherConfigurationForFirstTime]; self->_e9 = 1; } else if (added ||
+deleted) [self _stateLock_transitionToNewSwitcherConfigurationAfterAddedExtensions:…]`.
+So the first-time setup runs only while flag +0xe9 is clear, and it asserts because
+`_switcherConfiguration` (+0x98) is **already non-nil on that first call** — something
+else set it earlier in the same process without setting +0xe9 (candidate:
+`_stateLock_initializeEmptySwitcherConfiguration` or a load of a persisted configuration).
+Not the keybag: the AKS stub reports lock state 0x4 = unlocked since boot (patch 0038).
+Cheap next check: pull the log of a later boot to see whether PosterBoard still crashes
+once its data store has been written by the first run.
 
 ## Backlight plan (research 2026-10-23)
 

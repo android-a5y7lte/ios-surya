@@ -33,6 +33,7 @@ KERNEL=${1:?usage: tools/surya-test4.sh KERNEL [4b]}
 VARIANT=${2:-4}
 CPUS=${CPUS:-6}
 FBHZ=${FBHZ:-30}   # panel copy rate (sweetfb_hz); 60 = every vsync, smoother, more CPU
+ARGS=${ARGS:-}     # extra boot-args appended as is (e.g. ARGS="sweetbattery=1")
 case "$CPUS" in [1-8]) ;; *) echo "error: CPUS must be 1..8" >&2; exit 1 ;; esac
 NAME=test$VARIANT; [ "$CPUS" = 1 ] || NAME=$NAME-cpu$CPUS; [ "$FBHZ" = 30 ] || NAME=$NAME-hz$FBHZ
 case "$VARIANT" in
@@ -63,7 +64,7 @@ mkdir -p shim/out
 python3 tools/mkadt.py shim/out/surya.adt --highmem
 python3 tools/mkpayload.py "$KERNEL" shim/out/surya.adt shim/out/payload-surya-$NAME.bin \
 	"${BLOB[@]}" \
-	--cmdline "debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin $TOUCH $KEYSLOG$EXTRA"
+	--cmdline "debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin $TOUCH $KEYSLOG$EXTRA${ARGS:+ $ARGS}"
 shim/build-surya.sh shim/out/payload-surya-$NAME.bin
 mv shim/out/shim-boot-surya.img shim/out/shim-boot-surya-$NAME.img
 sha256sum shim/out/shim-boot-surya-$NAME.img

@@ -15,6 +15,18 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 15:12** — **Test 3 PASSED.** `fastboot boot shim/out/shim-boot-surya.img`
+  (SHA256 `7c9048e2…28c9`, nothing flashed). Photo:
+  `evidence/2026-10-23-test3-shim-ufs-probe.jpg`. Observed on screen:
+  - Red console with readable white/yellow text, correctly aligned → framebuffer
+    `0x9c000000`, 1080×2400, stride 4320, a8r8g8b8 is **correct on surya** (same as sweet).
+  - `INITRD lo=856FE000 hi=856FE045`, `LOADER no SWEETXNU payload` (expected: empty ramdisk).
+  - Own UFS driver works read-only: `ver=00000210` (UFS 2.1), `cap=1587031F`,
+    TUR/CAP/READ rc=0, LUN0 `lastlba=01CB97FF blk=00001000` (~123 GB, 128 GB model).
+  - GPT read: minidump, cust (ext4), recovery, cache (ext4), exaid, super (8 GiB),
+    **userdata lba=0x00284A18, 0x1A34D MiB (~105 GiB), ext4**.
+  - Ends with `UFS probe done, reset in ~3 min` (shim then resets via PSCI).
+
 - **2026-10-23** — Test 1 done: live DT + iomem read from the phone under
   Ubuntu Touch (read-only). Board layer matches sweet except touch (see table).
 
@@ -101,7 +113,7 @@ Sources: ios-sweet tree at fork time, and
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.
 2. ~~Does ABL leave the panel in video mode?~~ — DT says video mode + cont-splash; confirm on screen with the shim.
-2b. Splash pixel format and stride.
+2b. ~~Splash pixel format and stride~~ — a8r8g8b8, stride 4320 confirmed by Test 3.
 3. Is the `spi0` serial engine already loaded in SPI mode at handoff (as sweet
    relied on ABL-loaded I²C firmware)?
 4. Does the Novatek touch IC need host-uploaded firmware before it reports touches?

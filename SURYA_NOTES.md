@@ -469,6 +469,20 @@ check the LaunchServices/ExtensionKit registration of `com.apple.posterkit.provi
 - Checked here: patch applies to the reconstructed post-0082 files; `clang -fsyntax-only`
   with stub headers (C and C++). Not built by CI yet.
 
+**Test 8 (2026-10-23 ~22:40, CI run 40011481563, `ARGS="sweetbattery=1 sweetbl=2"`):**
+`SWEET BL: ctrl mod_en=0x80 sink A en=0x80 w=0 lvl=0x7ff B en=0 … sync=0x3 src=0/0/0` →
+module A, **12-bit** (max 0xfff), ABL leaves 0x7ff (50%). Self-test visibly dimmed the
+screen (owner) → **SPMI writes work**. `SWEET FB: display off` → `SWEET BL: backlight off
+(mod_en was 0x80)` and on again → **screen-off really turns the LCD light off**.
+backboardd matched `backlight-control` → SweetBacklight, still looked up
+`IODeviceTree:/backlight` (none), but **never called setProperties or newUserClient**, so
+the slider does nothing. And the UI became **noticeably laggy**; the same kernel without
+`sweetbl` was smooth again (A/B by the owner) → backboardd's brightness machinery costs
+CPU once it finds a backlight service. Patch **0084**: `sweetbl` is a bit mask
+(1 screen-off hook, 2 publish backlight-control [experimental], 4 self-test);
+recommended `sweetbl=1`. Slider: needs the real protocol (likely the D22 `/backlight`
+ADT node + whatever CoreBrightness reads) — later.
+
 ## Open questions (in order)
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.

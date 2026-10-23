@@ -1,0 +1,56 @@
+--- a/iokit/Kernel/arm/SweetBacklight.cpp
++++ b/iokit/Kernel/arm/SweetBacklight.cpp
+@@ -2,8 +2,13 @@
+  * surya (POCO X3 NFC) LCD backlight: PM6150L WLED5 (SID 5, ctrl 0xd800,
+  * sink 0xd900), driven through sweet_spmi_write() (patch 0083).
+  *
+- * Off unless boot-arg sweetbl=1 (or 2 = also dim to ~11% for 2 s at start as
+- * a visible self-test). Registers follow Linux qcom-wled.c (WLED5):
++ * Off unless boot-arg sweetbl is set; it is a bit mask (patch 0084):
++ *   1  screen off/on switches the LCD backlight (SweetFramebuffer hook)
++ *   2  publish backlight-control for backboardd (EXPERIMENTAL: backboardd
++ *      never sent a brightness value and the UI got noticeably laggier on
++ *      surya, test 8; off by default)
++ *   4  self-test: dim to ~11% for 2 s at start
++ * Recommended: sweetbl=1. Registers follow Linux qcom-wled.c (WLED5):
+  *   ctrl  0x46 bit 7     module enable (display off = 0, on = restore)
+  *   sink  0x50 / 0x60    MOD_A / MOD_B enable (bit 7), read only here
+  *   sink  0x52 / 0x62    brightness width (1 = 15 bit, 0 = 12 bit)
+@@ -270,7 +275,7 @@
+ {
+ 	int mode = 0;
+ 	(void)PE_parse_boot_argn("sweetbl", &mode, sizeof(mode));
+-	if (mode < 1 || !IOService::start(provider)) {
++	if ((mode & 7) == 0 || !IOService::start(provider)) {
+ 		return false;
+ 	}
+ 	fLock = IOLockAlloc();
+@@ -292,11 +297,13 @@
+ 			hi = mid - 1;
+ 		}
+ 	}
+-	setProperty("backlight-control", kOSBooleanTrue);
++	if (mode & 2) {
++		setProperty("backlight-control", kOSBooleanTrue);
++	}
+ 	publishLevel((uint32_t)lo);
+-	IOLog("SWEET BL: WLED5 module %c, max %#x, boot raw %#x = level %u\n",
+-	    fModB ? 'B' : 'A', fRawMax, fRaw, (unsigned)lo);
+-	if (mode == 2) {
++	IOLog("SWEET BL: WLED5 module %c, max %#x, boot raw %#x = level %u, mode %#x\n",
++	    fModB ? 'B' : 'A', fRawMax, fRaw, (unsigned)lo, (unsigned)mode);
++	if (mode & 4) {
+ 		uint16_t boot = fRaw;
+ 		IOLog("SWEET BL: self-test: ~11%% for 2 s\n");
+ 		IOLockLock(fLock);
+@@ -308,7 +315,9 @@
+ 		IOLockUnlock(fLock);
+ 		IOLog("SWEET BL: self-test %s\n", ok ? "done" : "WRITE FAILED");
+ 	}
+-	gSweetBacklight = this;
++	if (mode & 1) {
++		gSweetBacklight = this;         /* screen-off hook */
++	}
+ 	registerService();
+ 	return true;
+ }

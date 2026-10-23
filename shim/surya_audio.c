@@ -29,6 +29,10 @@
  *
  * Step A4 (SURYA_AUDIO=4): no LPASS; times TLMM pad writes (gpio53 latch only,
  * OE off) for a CPU-generated I2S, and dumps amp registers 0x00-0x0f.
+ * (Its ns/op printout is 1000x too large: write ~40 ns, read ~547 ns.)
+ *
+ * Step A5 (SURYA_AUDIO=5): first sound: CPU-generated I2S on gpio53-55, quiet
+ * 500 Hz tone for 1.5 s with minimum amp gain, then amps back to shutdown.
  */
 #include <stdint.h>
 #include "console.h"
@@ -375,6 +379,124 @@ static void amp_probe(uint8_t addr, const char *label)
 	con_hex2(label, "rev_id(7d)=", id, "err=", (uint32_t)-e2);
 }
 
+#if SURYA_AUDIO_STEP == 5
+/*
+ * Step A5: first sound. No LPASS (step A3 froze): the CPU itself generates
+ * I2S on the tertiary MI2S pins as plain GPIO outputs: gpio53 = BCLK,
+ * gpio54 = WS, gpio55 = SD0 (data to the amps; DT rx-lines 0x01). gpio56
+ * (SD1, data from the amps) stays an input. Format = the amps' reset
+ * default: I2S, 2 x 32-bit slots, 24-bit words, MSB first, data latched on
+ * BCLK rising edges. 8 kHz -> BCLK 512 kHz (half period 18.75 ticks of the
+ * 19.2 MHz counter). Tone: 500 Hz sine at about -24 dBFS, amp gain at its
+ * minimum (PB_CFG1 = 0 -> 8.5 dB): quiet. 0.3 s silence, 1.5 s tone, 0.3 s
+ * silence, then both amps back to software shutdown and pins to inputs.
+ */
+static int amp_write(uint8_t addr, uint8_t reg, uint8_t val)
+{
+	uint8_t b[2] = { reg, val };
+	return i2c_msg(addr, b, 2, 0, 0, 0);
+}
+
+static const int32_t sine16[16] = {
+	0, 202057, 373352, 487808, 528000, 487808, 373352, 202057,
+	0, -202057, -373352, -487808, -528000, -487808, -373352, -202057,
+};
+
+static inline void pad(uintptr_t io, unsigned high)
+{
+	*(volatile uint32_t *)io = high ? 2U : 0U;	/* posted store, ~40 ns */
+}
+
+static void i2s_stream(unsigned frames_silence1, unsigned frames_tone, unsigned frames_silence2)
+{
+	uintptr_t bclk = CFG(TLMM_WEST, 53) + 4, ws = CFG(TLMM_WEST, 54) + 4, sd = CFG(TLMM_WEST, 55) + 4;
+	unsigned total = frames_silence1 + frames_tone + frames_silence2;
+	uint64_t t0 = ticks() + 1000, edge = 0;
+	unsigned last_sd = 0, last_ws = 0;
+	pad(bclk, 1);
+	for (unsigned f = 0; f < total; f++) {
+		int32_t smp = 0;
+		if (f >= frames_silence1 && f < frames_silence1 + frames_tone)
+			smp = sine16[f & 15];
+		uint32_t word = (uint32_t)smp << 8;	/* 24-bit sample, MSB first in a 32-bit slot */
+		for (unsigned bit = 0; bit < 64; bit++) {
+			/*
+			 * I2S: WS low for BCLK 0-31 (left), high for 32-63 (right);
+			 * each slot's MSB follows one BCLK after the WS edge (bit 1 /
+			 * bit 33), so data bit position = (bit - 1) mod 32.
+			 */
+			unsigned wsv = bit >= 32;
+			unsigned pos = (bit + 31) & 31;
+			unsigned d = (pos < 32) ? (word >> (31 - pos)) & 1U : 0;
+			/* falling edge: change WS and data */
+			while (ticks() < t0 + (edge * 75) / 4)
+				;
+			pad(bclk, 0);
+			if (wsv != last_ws) {
+				pad(ws, wsv);
+				last_ws = wsv;
+			}
+			if (d != last_sd) {
+				pad(sd, d);
+				last_sd = d;
+			}
+			edge++;
+			/* rising edge: amps latch */
+			while (ticks() < t0 + (edge * 75) / 4)
+				;
+			pad(bclk, 1);
+			edge++;
+		}
+	}
+	pad(sd, 0);
+	pad(ws, 0);
+	pad(bclk, 0);
+}
+
+static void audio_beep(void)
+{
+	static const uint8_t amps[] = { 0x4c, 0x4d };
+	uint8_t pwr[2] = { 0, 0 };
+	con_str("AUDIO", "step A5: quiet 500 Hz tone, 1.5 s");
+	for (unsigned a = 0; a < 2; a++) {
+		int e = i2c_read(amps[a], 0x02, &pwr[a], 1);
+		if (!e)
+			e = amp_write(amps[a], 0x03, 0x00);		/* PB_CFG1: min amp gain 8.5 dB */
+		if (!e)
+			e = amp_write(amps[a], 0x06, 0x01);		/* TDM_CFG0: 8 kHz, frame start H->L */
+		if (!e)
+			e = amp_write(amps[a], 0x02, (uint8_t)(pwr[a] & ~3U));	/* PWR_CTRL: active, sense off */
+		con_hex2(a ? "AMP 4D SETUP" : "AMP 4C SETUP", "pwr was=", pwr[a], "err=", (uint32_t)-e);
+		if (e)
+			goto shutdown;
+	}
+	/* pins: gpio function, no pull, 2 mA, output low */
+	for (unsigned n = 53; n <= 55; n++) {
+		uintptr_t c = CFG(TLMM_WEST, n);
+		wr(c + 4, 0);
+		wr(c, (rd(c) & ~0x3ffU) | (1U << 9));
+	}
+	con_str("AUDIO", "streaming... (listen now)");
+	i2s_stream(2400, 12000, 2400);
+	con_str("AUDIO", "stream done");
+	for (unsigned n = 53; n <= 55; n++) {
+		uintptr_t c = CFG(TLMM_WEST, n);
+		wr(c, (rd(c) & ~0x3ffU) | 1U);		/* back to input, pull-down (as found) */
+	}
+shutdown:
+	for (unsigned a = 0; a < 2; a++) {
+		uint8_t st[8] = {0}, now = 0;
+		(void)amp_write(amps[a], 0x02, pwr[a] ? pwr[a] : 0x0e);	/* back to shutdown */
+		(void)i2c_read(amps[a], 0x02, &now, 1);
+		int e = i2c_read(amps[a], 0x24, st, 8);			/* status/latched IRQ area (diagnostic) */
+		con_hex2(a ? "AMP 4D AFTER" : "AMP 4C AFTER", "pwr=", now, "err=", (uint32_t)-e);
+		con_hex2(a ? "AMP 4D 24-2b" : "AMP 4C 24-2b", "",
+		    ((uint32_t)st[0] << 24) | ((uint32_t)st[1] << 16) | ((uint32_t)st[2] << 8) | st[3], "",
+		    ((uint32_t)st[4] << 24) | ((uint32_t)st[5] << 16) | ((uint32_t)st[6] << 8) | st[7]);
+	}
+}
+#endif
+
 void surya_audio_probe(void)
 {
 	con_str("AUDIO", "surya step A1: speaker amp probe");
@@ -412,6 +534,9 @@ void surya_audio_probe(void)
 	udelay(20000);
 	amp_probe(0x4c, "AMP 4C (right)");
 	amp_probe(0x4d, "AMP 4D (left)");
+#endif
+#if SURYA_AUDIO_STEP == 5
+	audio_beep();
 #endif
 #if SURYA_AUDIO_STEP == 4
 	/*

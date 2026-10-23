@@ -539,6 +539,14 @@ Step A4: TLMM write timing + amp regs 0x00-0x0f.
 A CPU-generated I2S at 8 kHz (256 kHz BCLK, a few writes per bit) is well within reach.
 Amp regs 0x00-0x0f, both: `00 00 0e 20 c6 22 09 02 0a 10 13 02 00 04 05 06` (0x4d has
 0x8e at 0x02). Matches TAS2562 defaults (TDM_CFG0 0x09 = 48 kHz).
+Step A5 (`SURYA_AUDIO=5`): first sound attempt. CPU-generated I2S (gpio53 BCLK, 54 WS,
+55 SD0; 56 untouched), I2S 2x32-bit slots, 24-bit words, rising-edge latch (amp reset
+defaults per Linux tas2562.c: TDM_CFG1 0x02 offset 1, TDM_CFG2 0x0a 32/24-bit, TDM_CFG3
+0x10 slots 0/1), 8 kHz (TDM_CFG0 = 0x01), BCLK 512 kHz paced by CNTPCT. Amps: PB_CFG1 =
+0 (min gain 8.5 dB), PWR_CTRL active with sense off, 500 Hz sine at about -24 dBFS for
+1.5 s between 0.3 s of silence; then PWR_CTRL restored (shutdown), pins back to inputs,
+status 0x24-0x2b dumped. Open risk: the amps' clock monitor may not accept the
+CPU-generated clock (then no sound, status shows it).
 
 ## Open questions (in order)
 

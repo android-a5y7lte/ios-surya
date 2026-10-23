@@ -1,0 +1,548 @@
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -4,12 +4,20 @@
+  * No interrupt clear, peripheral enable, charger config, or PMIC writes.
+  * Init is serialized by the single built-in SweetBattery personality.
+  * Battery APIDs are disjoint from the existing keys' 008/4c1 APIDs.
++ *
++ * surya (patch 0083): reads also allowed for the PM6150L WLED (SID 5,
++ * peripherals 0xd8 ctrl / 0xd9 sink), and sweet_spmi_write() issues
++ * EXT_WRITEL on the APPS channel ("chnls" 0x0c600000 + 0x10000 * APID) for a
++ * fixed list of WLED registers only (module enable, brightness, sync), and
++ * only when the ownership table gives that APID to EE 0 (APPS), like
++ * Linux spmi-pmic-arb v5. Used by SweetBacklight (boot-arg sweetbl=1).
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <machine/machine_routines.h>
+ #include <IOKit/IOLocks.h>
++#include <libkern/OSAtomic.h>
+ #include "sweet_spmi.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+@@ -17,12 +25,15 @@
+ #define SP_CORE_PA 0x0c440000u
+ #define SP_OBS_PA  0x0e600000u
+ #define SP_CFG_PA  0x0c40a000u
++#define SP_CHN_PA  0x0c600000u
+ #define SP_NO_APID 0xffffu
+ 
+ static vm_offset_t sp_core, sp_obs, sp_cfg;
+ static IOLock *sp_lock;
+ static unsigned sp_count;
+ static bool sp_attempted, sp_ready;
++static volatile UInt32 sp_init_state; /* 0 idle, 1 running, 2 done */
++static vm_offset_t sp_chn_map[512]; /* write channel pages, mapped lazily */
+ /* A timed-out command may complete late: never reuse that lane this boot. */
+ static bool sp_poisoned[512];
+ 
+@@ -51,9 +62,26 @@
+ 	return found;
+ }
+ 
++static int sweet_spmi_init_once(void);
++
+ int
+ sweet_spmi_init(void)
+ {
++	/* SweetBattery and SweetBacklight may start concurrently. */
++	if (OSCompareAndSwap(0, 1, &sp_init_state)) {
++		(void)sweet_spmi_init_once();
++		__asm__ volatile("dmb ish" ::: "memory");
++		sp_init_state = 2;
++	}
++	while (sp_init_state != 2) {
++		delay(100);
++	}
++	return sp_ready ? 0 : -1;
++}
++
++static int
++sweet_spmi_init_once(void)
++{
+ 	if (sp_attempted) {
+ 		return sp_ready ? 0 : -1;
+ 	}
+@@ -88,9 +116,11 @@
+ {
+ 	/* Restrict access to the battery blocks; keys retain their own lanes. */
+ 	unsigned peripheral = addr >> 8;
+-	if (!sp_ready || !out || sid != 0 || addr > 0xffffu ||
+-	    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&
+-	    peripheral != 0x13 && peripheral != 0x48)) {
++	bool battery = sid == 0 &&
++	    (peripheral == 0x10 || peripheral == 0x11 || peripheral == 0x12 ||
++	    peripheral == 0x13 || peripheral == 0x48);
++	bool wled = sid == 5 && (peripheral == 0xd8 || peripheral == 0xd9);
++	if (!sp_ready || !out || addr > 0xffffu || (!battery && !wled)) {
+ 		return -1;
+ 	}
+ 	IOLockLock(sp_lock);
+@@ -122,5 +152,71 @@
+ 	    sid, addr, apid);
+ 	IOLockUnlock(sp_lock);
+ 	return -1;
++}
++static bool
++sp_write_allowed(unsigned sid, unsigned addr)
++{
++	if (sid != 5) {
++		return false;
++	}
++	switch (addr) {
++	case 0xd846:    /* WLED ctrl MOD_EN (bit 7) */
++	case 0xd953:    /* sink MOD_A brightness LSB */
++	case 0xd954:    /* sink MOD_A brightness MSB */
++	case 0xd963:    /* sink MOD_B brightness LSB */
++	case 0xd964:    /* sink MOD_B brightness MSB */
++	case 0xd965:    /* sink MOD_SYNC_BIT */
++		return true;
++	default:
++		return false;
++	}
++}
++
++int
++sweet_spmi_write(unsigned sid, unsigned addr, uint8_t value)
++{
++	if (!sp_ready || !sp_write_allowed(sid, addr)) {
++		return -1;
++	}
++	IOLockLock(sp_lock);
++	uint16_t apid = sp_find_apid((sid << 8) | (addr >> 8));
++	if (apid == SP_NO_APID || sp_poisoned[apid] ||
++	    (sp_rd(sp_cfg, 0x700u + 4u * apid) & 7u) != 0) {
++		IOLockUnlock(sp_lock);
++		printf("SWEET SPMI: write sid=%u addr=%#x refused (APID %u not APPS-owned)\n",
++		    sid, addr, apid);
++		return -1;
++	}
++	if (!sp_chn_map[apid]) {
++		sp_chn_map[apid] = ml_io_map(SP_CHN_PA + 0x10000u * apid, 0x1000);
++		if (!sp_chn_map[apid]) {
++			IOLockUnlock(sp_lock);
++			return -1;
++		}
++	}
++	vm_offset_t ch = sp_chn_map[apid];
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(ch + 0x10u) = value;                 /* WDATA0 */
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(ch + 0x00u) = (addr & 0xffu) << 4;   /* EXT_WRITEL, BC=0 */
++	__asm__ volatile("dsb osh" ::: "memory");
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t status = sp_rd(ch, 0x08u);
++		if (status & 1u) {
++			IOLockUnlock(sp_lock);
++			if (status & 0x0eu) {
++				printf("SWEET SPMI: write sid=%u addr=%#x status %#x\n",
++				    sid, addr, status);
++				return -1;
++			}
++			return 0;
++		}
++		delay(1);
++	}
++	sp_poisoned[apid] = true;
++	printf("SWEET SPMI: write timeout sid=%u addr=%#x APID=%u disabled\n",
++	    sid, addr, apid);
++	IOLockUnlock(sp_lock);
++	return -1;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -8,6 +8,8 @@
+ int sweet_spmi_init(void);
+ /* Thread context only; 0 success, -1 failure; *out unchanged on failure. */
+ int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++/* WLED registers only (see sweet_spmi.c); thread context; 0 / -1. */
++int sweet_spmi_write(unsigned sid, unsigned addr, uint8_t value);
+ #ifdef __cplusplus
+ }
+ #endif
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetBacklight.cpp
+@@ -0,0 +1,331 @@
++/*
++ * surya (POCO X3 NFC) LCD backlight: PM6150L WLED5 (SID 5, ctrl 0xd800,
++ * sink 0xd900), driven through sweet_spmi_write() (patch 0083).
++ *
++ * Off unless boot-arg sweetbl=1 (or 2 = also dim to ~11% for 2 s at start as
++ * a visible self-test). Registers follow Linux qcom-wled.c (WLED5):
++ *   ctrl  0x46 bit 7     module enable (display off = 0, on = restore)
++ *   sink  0x50 / 0x60    MOD_A / MOD_B enable (bit 7), read only here
++ *   sink  0x52 / 0x62    brightness width (1 = 15 bit, 0 = 12 bit)
++ *   sink  0x53+0x54 / 0x63+0x64   brightness LSB/MSB of MOD_A / MOD_B
++ *   sink  0x65 bits 1:0  sync: clear, then set the module's bit
++ * The module ABL left enabled and its current level are read at start;
++ * nothing is written before iOS asks (or the self-test).
++ *
++ * iOS side: backboardd looks for an IOService with property
++ * backlight-control = true. This service publishes it plus
++ * IODisplayParameters/brightness {min 0, max 65536, value} and logs every
++ * setProperties() and newUserClient() call as "SWEET BL: ..." so the real
++ * protocol can be read from the log. Brightness values found under
++ * IODisplayParameters.brightness(.value) or brightness(.value) are applied
++ * (perceptual square curve, floor 0.5%). SweetFramebuffer's
++ * RequestPowerChange calls sweet_backlight_display_power() so screen off
++ * really switches the LCD backlight off.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
++#include <libkern/c++/OSSerialize.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSBoolean.h>
++#include <libkern/c++/OSDictionary.h>
++#include <pexpert/pexpert.h>
++#include <sys/proc.h>
++
++extern "C" int sweet_spmi_init(void);
++extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++extern "C" int sweet_spmi_write(unsigned sid, unsigned addr, uint8_t value);
++extern "C" void sweet_backlight_display_power(int on);
++
++#define BL_SID          5u
++#define BL_CTRL         0xd800u
++#define BL_SINK         0xd900u
++#define BL_LEVEL_MAX    65536u
++
++class SweetBacklight : public IOService {
++	OSDeclareDefaultStructors(SweetBacklight);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
++	    OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++	void displayPower(bool on);
++private:
++	IOLock   *fLock;
++	bool      fModB;        /* module in use: false = A, true = B */
++	uint16_t  fRawMax;      /* 0x7fff or 0xfff */
++	uint16_t  fRaw;         /* last brightness written or read */
++	uint32_t  fLevel;       /* 0..BL_LEVEL_MAX as published */
++	uint8_t   fSync;        /* sink 0x65 as read at start */
++	bool      fOff;
++	unsigned  fLogged;
++	bool probe(void);
++	bool writeRaw(uint16_t raw);
++	uint16_t levelToRaw(uint32_t level);
++	void publishLevel(uint32_t level);
++	bool applyLevel(uint32_t level);
++};
++OSDefineMetaClassAndStructors(SweetBacklight, IOService);
++
++static SweetBacklight *gSweetBacklight;
++
++static bool
++bl_rd(unsigned addr, uint8_t *v)
++{
++	return sweet_spmi_read(BL_SID, addr, v) == 0;
++}
++
++bool
++SweetBacklight::probe(void)
++{
++	uint8_t en = 0, a_en = 0, b_en = 0, a_w = 0, b_w = 0;
++	uint8_t a_lo = 0, a_hi = 0, b_lo = 0, b_hi = 0, sync = 0;
++	uint8_t src0 = 0, src1 = 0, src2 = 0;
++	bool ok = bl_rd(BL_CTRL + 0x46, &en) &&
++	    bl_rd(BL_SINK + 0x50, &a_en) && bl_rd(BL_SINK + 0x60, &b_en) &&
++	    bl_rd(BL_SINK + 0x52, &a_w) && bl_rd(BL_SINK + 0x62, &b_w) &&
++	    bl_rd(BL_SINK + 0x53, &a_lo) && bl_rd(BL_SINK + 0x54, &a_hi) &&
++	    bl_rd(BL_SINK + 0x63, &b_lo) && bl_rd(BL_SINK + 0x64, &b_hi) &&
++	    bl_rd(BL_SINK + 0x65, &sync) &&
++	    bl_rd(BL_SINK + 0x73, &src0) && bl_rd(BL_SINK + 0x83, &src1) &&
++	    bl_rd(BL_SINK + 0x93, &src2);
++	if (!ok) {
++		IOLog("SWEET BL: WLED read failed\n");
++		return false;
++	}
++	IOLog("SWEET BL: ctrl mod_en=%#x sink A en=%#x w=%u lvl=%#x B en=%#x w=%u lvl=%#x sync=%#x src=%x/%x/%x\n",
++	    en, a_en, a_w, (a_hi << 8) | a_lo, b_en, b_w, (b_hi << 8) | b_lo, sync,
++	    src0, src1, src2);
++	if (a_en & 0x80) {
++		fModB = false;
++	} else if (b_en & 0x80) {
++		fModB = true;
++	} else {
++		fModB = (src0 & 3u) == 1u;
++	}
++	uint8_t w = fModB ? b_w : a_w;
++	fRawMax = (w & 1u) ? 0x7fff : 0xfff;
++	fRaw = (uint16_t)((fModB ? ((b_hi << 8) | b_lo) : ((a_hi << 8) | a_lo)) & fRawMax);
++	fSync = sync;
++	if (!(en & 0x80)) {
++		IOLog("SWEET BL: WLED module is disabled at start; leaving it alone\n");
++		return false;
++	}
++	return true;
++}
++
++bool
++SweetBacklight::writeRaw(uint16_t raw)
++{
++	unsigned lsb = BL_SINK + (fModB ? 0x63 : 0x53);
++	uint8_t base = fSync & ~3u;
++	bool ok = sweet_spmi_write(BL_SID, lsb, raw & 0xff) == 0 &&
++	    sweet_spmi_write(BL_SID, lsb + 1, (raw >> 8) & 0x7f) == 0 &&
++	    sweet_spmi_write(BL_SID, BL_SINK + 0x65, base) == 0 &&
++	    sweet_spmi_write(BL_SID, BL_SINK + 0x65, base | (fModB ? 2u : 1u)) == 0;
++	if (ok) {
++		fRaw = raw;
++	}
++	return ok;
++}
++
++uint16_t
++SweetBacklight::levelToRaw(uint32_t level)
++{
++	if (level > BL_LEVEL_MAX) {
++		level = BL_LEVEL_MAX;
++	}
++	uint64_t raw = ((uint64_t)level * level * fRawMax) / ((uint64_t)BL_LEVEL_MAX * BL_LEVEL_MAX);
++	uint64_t floor = fRawMax / 200 + 1;
++	if (raw < floor) {
++		raw = floor;
++	}
++	return (uint16_t)raw;
++}
++
++void
++SweetBacklight::publishLevel(uint32_t level)
++{
++	OSDictionary *params = OSDictionary::withCapacity(1);
++	OSDictionary *bright = OSDictionary::withCapacity(3);
++	OSNumber *mn = OSNumber::withNumber(0ULL, 32);
++	OSNumber *mx = OSNumber::withNumber((unsigned long long)BL_LEVEL_MAX, 32);
++	OSNumber *val = OSNumber::withNumber((unsigned long long)level, 32);
++	if (params && bright && mn && mx && val) {
++		bright->setObject("min", mn);
++		bright->setObject("max", mx);
++		bright->setObject("value", val);
++		params->setObject("brightness", bright);
++		setProperty("IODisplayParameters", params);
++	}
++	OSSafeReleaseNULL(params);
++	OSSafeReleaseNULL(bright);
++	OSSafeReleaseNULL(mn);
++	OSSafeReleaseNULL(mx);
++	OSSafeReleaseNULL(val);
++	fLevel = level;
++}
++
++bool
++SweetBacklight::applyLevel(uint32_t level)
++{
++	IOLockLock(fLock);
++	uint16_t raw = levelToRaw(level);
++	bool ok = fOff ? true : writeRaw(raw);
++	if (fOff) {
++		fRaw = raw;     /* applied when the display comes back on */
++	}
++	IOLockUnlock(fLock);
++	if (ok) {
++		publishLevel(level);
++	}
++	if (fLogged < 64) {
++		IOLog("SWEET BL: level %u -> raw %#x%s%s\n", level, raw,
++		    fOff ? " (display off, deferred)" : "", ok ? "" : " WRITE FAILED");
++	}
++	return ok;
++}
++
++void
++SweetBacklight::displayPower(bool on)
++{
++	IOLockLock(fLock);
++	uint8_t en = 0;
++	bool ok = false;
++	if (on != !fOff && bl_rd(BL_CTRL + 0x46, &en)) {
++		if (on) {
++			ok = writeRaw(fRaw) &&
++			    sweet_spmi_write(BL_SID, BL_CTRL + 0x46, en | 0x80) == 0;
++		} else {
++			ok = sweet_spmi_write(BL_SID, BL_CTRL + 0x46, en & 0x7f) == 0;
++		}
++		if (ok) {
++			fOff = !on;
++		}
++		IOLog("SWEET BL: backlight %s (mod_en was %#x)%s\n", on ? "on" : "off",
++		    en, ok ? "" : " WRITE FAILED");
++	}
++	IOLockUnlock(fLock);
++}
++
++static bool
++bl_number(OSObject *o, uint32_t *out)
++{
++	OSNumber *n = OSDynamicCast(OSNumber, o);
++	if (n) {
++		*out = n->unsigned32BitValue();
++		return true;
++	}
++	OSDictionary *d = OSDynamicCast(OSDictionary, o);
++	if (d && (n = OSDynamicCast(OSNumber, d->getObject("value")))) {
++		*out = n->unsigned32BitValue();
++		return true;
++	}
++	return false;
++}
++
++IOReturn
++SweetBacklight::setProperties(OSObject *properties)
++{
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	if (fLogged < 64) {
++		fLogged++;
++		OSSerialize *s = OSSerialize::withCapacity(512);
++		if (s && properties && properties->serialize(s)) {
++			IOLog("SWEET BL: %s setProperties %.300s\n", name, s->text());
++		} else {
++			IOLog("SWEET BL: %s setProperties (unprintable)\n", name);
++		}
++		OSSafeReleaseNULL(s);
++	}
++	OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
++	if (!dict) {
++		return kIOReturnBadArgument;
++	}
++	uint32_t level;
++	OSDictionary *params = OSDynamicCast(OSDictionary, dict->getObject("IODisplayParameters"));
++	OSObject *b = params ? params->getObject("brightness") : dict->getObject("brightness");
++	if (b && bl_number(b, &level)) {
++		return applyLevel(level) ? kIOReturnSuccess : kIOReturnIOError;
++	}
++	return kIOReturnSuccess;        /* accepted and logged, not understood */
++}
++
++IOReturn
++SweetBacklight::newUserClient(task_t owningTask, void *securityID, UInt32 type,
++    OSDictionary *properties, IOUserClient **handler)
++{
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOReturn ret = IOService::newUserClient(owningTask, securityID, type, properties, handler);
++	IOLog("SWEET BL: %s newUserClient type %u -> %#x\n", name, (unsigned)type, ret);
++	return ret;
++}
++
++bool
++SweetBacklight::start(IOService *provider)
++{
++	int mode = 0;
++	(void)PE_parse_boot_argn("sweetbl", &mode, sizeof(mode));
++	if (mode < 1 || !IOService::start(provider)) {
++		return false;
++	}
++	fLock = IOLockAlloc();
++	fOff = false;
++	fLogged = 0;
++	if (!fLock || sweet_spmi_init() != 0 || !probe()) {
++		IOLog("SWEET BL: not available\n");
++		return false;
++	}
++	/* Published level from the current raw value: largest level with
++	 * level^2 * max <= raw * LEVEL_MAX^2 (inverse square curve, < 2^48). */
++	uint64_t target = (uint64_t)fRaw * BL_LEVEL_MAX * BL_LEVEL_MAX;
++	uint64_t lo = 0, hi = BL_LEVEL_MAX;
++	while (lo < hi) {
++		uint64_t mid = (lo + hi + 1) / 2;
++		if (mid * mid * fRawMax <= target) {
++			lo = mid;
++		} else {
++			hi = mid - 1;
++		}
++	}
++	setProperty("backlight-control", kOSBooleanTrue);
++	publishLevel((uint32_t)lo);
++	IOLog("SWEET BL: WLED5 module %c, max %#x, boot raw %#x = level %u\n",
++	    fModB ? 'B' : 'A', fRawMax, fRaw, (unsigned)lo);
++	if (mode == 2) {
++		uint16_t boot = fRaw;
++		IOLog("SWEET BL: self-test: ~11%% for 2 s\n");
++		IOLockLock(fLock);
++		bool ok = writeRaw(levelToRaw(BL_LEVEL_MAX / 3));
++		IOLockUnlock(fLock);
++		IOSleep(2000);
++		IOLockLock(fLock);
++		ok = writeRaw(boot) && ok;
++		IOLockUnlock(fLock);
++		IOLog("SWEET BL: self-test %s\n", ok ? "done" : "WRITE FAILED");
++	}
++	gSweetBacklight = this;
++	registerService();
++	return true;
++}
++
++extern "C" void
++sweet_backlight_display_power(int on)
++{
++	SweetBacklight *bl = gSweetBacklight;
++	if (bl) {
++		bl->displayPower(on != 0);
++	}
++}
++#else
++extern "C" void sweet_backlight_display_power(int on);
++extern "C" void
++sweet_backlight_display_power(int on)
++{
++	(void)on;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -20,6 +20,7 @@
+  *      button / auto-lock), else on. Off fades the panel out over a few
+  *      vsyncs (halving each pixel) and keeps it black until on again;
+  *      the panel itself stays powered (AMOLED black pixels are off).
++ *      surya's LCD also needs its backlight off: SweetBacklight (sweetbl=1).
+  *   18 IsMainDisplay,
+  *   28 GetDotPitch, 72 Enable/DisableNotifications [func, refcon, type, 0]
+  * Everything else is accepted and logged once.
+@@ -37,6 +38,7 @@
+ #include "SweetSurface.h"
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
++extern "C" void sweet_backlight_display_power(int on); /* SweetBacklight.cpp (surya) */
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -543,6 +545,7 @@
+ 			}
+ 			IOLockUnlock(fFB->fLock);
+ 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");
++			sweet_backlight_display_power(!off);     /* LCD: no-op unless sweetbl */
+ 		}
+ 		break;
+ 	case kSweetFBSwapWait:
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -16,6 +16,7 @@
+ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
++iokit/Kernel/arm/SweetBacklight.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -82,6 +82,11 @@
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
+     "   },"
++    "   {"
++    "     'IOClass'         = SweetBacklight;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetBacklight;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"

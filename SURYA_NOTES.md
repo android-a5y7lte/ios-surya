@@ -449,6 +449,26 @@ check the LaunchServices/ExtensionKit registration of `com.apple.posterkit.provi
   user-client call (IOKit trace, patch 0049), then map the value to WLED brightness.
   Same service gives real screen-off (brightness 0) for the power button.
 
+### Patch 0083 `surya-wled-backlight` (2026-10-23, untested)
+
+- `bsd/dev/sweet_spmi.c`: init made race-safe (SweetBattery and SweetBacklight may start
+  together); reads also allowed for SID 5 peripherals 0xd8/0xd9; new
+  `sweet_spmi_write(sid, addr, val)`: EXT_WRITEL on chnls `0x0c600000 + 0x10000*APID`
+  (WDATA0 +0x10, CMD +0x00 = addr<<4, STATUS +0x08), only for SID 5 registers 0xd846,
+  0xd953/54, 0xd963/64, 0xd965 and only if the ownership table (cnfg+0x700+4*APID &7)
+  gives the APID to EE 0 — same rules as Linux spmi-pmic-arb v5.
+- `iokit/Kernel/arm/SweetBacklight.cpp` (IOResources personality, only with boot-arg
+  `sweetbl=1`; `sweetbl=2` also dims to ~11% for 2 s at start as a visible self-test):
+  reads WLED state at start and logs `SWEET BL: ctrl mod_en=… sink A en=… lvl=…`; picks
+  the enabled module; publishes `backlight-control = true` and
+  `IODisplayParameters.brightness {min 0, max 65536, value}`; logs every setProperties /
+  newUserClient (`SWEET BL: …`) so backboardd's real protocol shows in the log; applies
+  `brightness`/`IODisplayParameters.brightness(.value)` with a square curve (floor 0.5%).
+- `SweetFramebuffer` RequestPowerChange → `sweet_backlight_display_power()`: clears /
+  restores ctrl 0x46 bit 7 (WLED module enable), so screen off turns the LCD light off.
+- Checked here: patch applies to the reconstructed post-0082 files; `clang -fsyntax-only`
+  with stub headers (C and C++). Not built by CI yet.
+
 ## Open questions (in order)
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.

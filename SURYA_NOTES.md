@@ -148,6 +148,19 @@ Sources: ios-sweet tree at fork time, and
   driver stays read-only), then `shim/build-surya.sh`.
 - Pass criterion: kernel log scrolls on screen; expected stop at waiting for root.
 
+## Test 5 prep (2026-10-23, owner's PC)
+
+- IPSW `iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw` (SHA1 `5606c298…0193`,
+  6,171,035,648 bytes) from updates.cdn-apple.com; OS `087-86698-044.dmg`,
+  SystemOS `087-86593-047.dmg`, AppOS `087-86715-047.dmg`.
+- apfs-fuse built from source (not in Mint repos).
+- `mkiosroot.sh` → `~/ios-ipsw/ios16-root.img` (16G, fsck OK) →
+  `sweet-root-tweaks.py` (7 _PanicOnCrash renamed, 2 CommCenter jobs removed;
+  warning: no mobileactivationd system container, data ark skipped) →
+  `ios16-root.simg` (12G) SHA256 `e2555a15…dbf8`.
+- `tools/surya-test4.sh KERNEL 5` = README boot-args with `cpus=1 sweettouch=0`
+  (buttons on, log ring on). Writes userdata — boot only after the flash.
+
 ## Open questions (in order)
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.

@@ -5,6 +5,13 @@
 # Run on the dev PC from the repo root:
 #   tools/surya-test4.sh path/to/kernel.development.sweet        # Test 4
 #   tools/surya-test4.sh path/to/kernel.development.sweet 4b     # Test 4b
+#   tools/surya-test4.sh path/to/kernel.development.sweet 5      # Test 5
+# Test 5 = first iOS boot from the flashed root in userdata (README boot-args,
+# but cpus=1 and sweettouch=0: surya's touch is Novatek SPI, not the Goodix
+# I2C chip patch 0060 drives). It WRITES to userdata (ufsrw=1 rootrw=1) and
+# keeps the persistent log ring at its end — only boot it after userdata holds
+# the iOS root image. Put research/ipsw-x/d22ap.adt in place first so the ADT
+# carries the iPhone X /product identity.
 # Test 4b adds rd=ufsroot0: the kernel's own UFS driver opens `userdata`
 # read-only and tries to mount it as the HFS root (expected to fail on the
 # current ext4 userdata -> root mount panic). Still no ufsrw: the driver
@@ -23,13 +30,23 @@ VARIANT=${2:-4}
 case "$VARIANT" in
 	4) EXTRA='' ;;
 	4b) EXTRA=' rd=ufsroot0' ;;
-	*) echo "error: variant must be 4 or 4b" >&2; exit 1 ;;
+	5) EXTRA=' rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 sweetfb_noconsole=1 sweetfb_hz=30' ;;
+	*) echo "error: variant must be 4, 4b or 5" >&2; exit 1 ;;
 esac
+# Tests 4/4b: buttons off and no log ring (nothing may write). Test 5: the
+# button driver only reads PMIC registers and surya's keys sit on the same
+# PM6150/PM6150L pins as sweet's, so it stays on; the log ring is allowed.
+if [ "$VARIANT" = 5 ]; then
+	KEYSLOG=''
+	[ -f research/ipsw-x/d22ap.adt ] || echo "warning: research/ipsw-x/d22ap.adt missing: iOS will see an iPod with a Home button" >&2
+else
+	KEYSLOG='sweetkeys=0 sweetlog=0'
+fi
 [ -f dtb/surya/surya-boot.dtb ] || { echo "error: dtb/surya/surya-boot.dtb missing" >&2; exit 1; }
 mkdir -p shim/out
 python3 tools/mkadt.py shim/out/surya.adt --highmem
 python3 tools/mkpayload.py "$KERNEL" shim/out/surya.adt shim/out/payload-surya-test$VARIANT.bin \
-	--cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweettouch=0 sweetkeys=0 sweetlog=0$EXTRA"
+	--cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweettouch=0 $KEYSLOG$EXTRA"
 shim/build-surya.sh ../shim/out/payload-surya-test$VARIANT.bin
 mv shim/out/shim-boot-surya.img shim/out/shim-boot-surya-test$VARIANT.img
 sha256sum shim/out/shim-boot-surya-test$VARIANT.img

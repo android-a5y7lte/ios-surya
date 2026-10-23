@@ -15,6 +15,14 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 17:36 — 🎉 TOUCH WORKS on surya (shim step 3c).** After the dummy-byte
+  fix: `NVT BOOT ok=1`, `FWINFO valid=1 max_xy=0438 0960`, then the 60 s loop drew
+  the owner's strokes across the **whole panel with 5 fingers at once** (finger 1 white,
+  2 green, 3+ yellow), coordinates matching the drawing position (1080×2400, no
+  rotation/flip needed). Sample `TOUCH XY x=0x22? y=0x74A`, `x=0x251 y=0x70D`.
+  Photo: `evidence/2026-10-23-touch-3c-WORKING-multitouch.jpg`. Only remaining touch
+  work: port into XNU (step 3d).
+
 - **2026-10-23 ~17:07 — cpus=6 works.** `CPUS=6 tools/surya-test4.sh KERNEL 5` →
   `shim-boot-surya-test5-cpu6.img`, `fastboot boot`: owner reports it reached the lock
   screen much faster ("like a real iPhone") than the ~15 min cpus=1 boot. Default for

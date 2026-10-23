@@ -566,6 +566,11 @@ A5b photo (`evidence/2026-10-24-audioA5b.jpg`): all writes err=0; after: 0x24-0x
 0x50 → 0xd0 on **both** amps vs A5 (bit 7 set on both), so both amps saw the same event;
 consistent with both having played. Register meanings still to look up (TAS2562 datasheet).
 Step A5c: 0x4c alone at 500 Hz, then 0x4d alone at 1 kHz, about -12 dBFS (4x), 2 s each, both amps' PWR_CTRL and status read around each phase.
+**A5c result (00:14, `evidence/2026-10-24-audioA5c.jpg`): STEREO MAPPED.** Low beep
+(amp **0x4c**, DT "right") from the **bottom speaker**; high beep (amp **0x4d**, DT "left")
+from the **earpiece/top speaker**. PWR_CTRL confirms one amp active at a time
+(0x0c/0x8e, then 0x0e/0x8c). Status 0x29 bit 7 set after playing (0x50 → 0xd0).
+So both speakers work through the CPU-generated I2S.
 
 ## Open questions (in order)
 

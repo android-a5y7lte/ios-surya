@@ -412,6 +412,16 @@ from the phone first). Backup of the 4 KiB block (block 2505282) in the owner's
 `printf '\037\040\003\325' | dd of=/dev/block/by-name/userdata bs=1 seek=10261637812 count=4 conv=notrunc`;
 read-back shows `1f20 03d5`. Undo: same with `'\050\066\000\265'`. The PC's
 `ios16-root.img` is still the unpatched original (reflashing it undoes the patch).
+**Test 7 (patched):** kernel logs `CODE SIGNING: cs_invalid_page(...) p=…[PosterBoard] …
+allowing (remove VALID) page` — modified shared-cache pages are accepted on this port.
+PosterBoard now passes first-time setup and crashes later: `-[PBFWallpaperPublisher
+activateWithSelectedLockPath:selectedHomePath:activeLockPath:activeHomePath:recentlyChanged:]
++836` ← `PBFPosterExtensionDataStoreXPCServiceGlue …didInitializeWithSwitcherConfiguration…`.
+The brk is `NSParameterAssert(selectedLockPath)`: the switcher configuration has **no
+poster at all** (no selected lock-screen poster). Likely real root cause: no poster
+extension (Collections/Photos/Emoji/Gradient/…) delivered descriptors, so the first-time
+setup builds an empty configuration (and the early lazy build was probably harmless).
+Next: which extension/daemon processes run (ExtensionKit / pkd / poster extensions).
 
 ## Backlight plan (research 2026-10-23)
 

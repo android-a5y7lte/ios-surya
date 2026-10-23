@@ -23,6 +23,11 @@ reference. **This file is the handoff for the surya port.**
   charging battery icon (static IOPMPowerSource), **iPhone X gesture layout** (home
   indicator bar, camera button, no Home button → /product identity from d22ap.adt works),
   CPU rendering on the Huaxing panel. Touch not expected (sweettouch=0).
+- **Power button works on surya (patch 0060 key driver, unchanged).** Press 1: lock UI
+  removed, wallpaper only (`evidence/2026-10-23-test5-power-press-off.jpg`) — iOS display
+  off; the 0079 fade-to-black does not switch the LCD backlight (PM6150L WLED), so
+  "off" stays lit — cosmetic TODO. Press 2: lock screen back at 4:21 with charging icon
+  and a new blue status icon (`-power-press-wake.jpg`).
 
 - **2026-10-23 16:20** — **Test 5: iOS userland boots on surya — Apple logo.**
   `fastboot -S 512M flash userdata ios16-root.simg` (24/24 OKAY, 377 s; owner approved

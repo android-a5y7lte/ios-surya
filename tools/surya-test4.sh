@@ -53,6 +53,6 @@ mkdir -p shim/out
 python3 tools/mkadt.py shim/out/surya.adt --highmem
 python3 tools/mkpayload.py "$KERNEL" shim/out/surya.adt shim/out/payload-surya-$NAME.bin \
 	--cmdline "debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweettouch=0 $KEYSLOG$EXTRA"
-shim/build-surya.sh ../shim/out/payload-surya-$NAME.bin
+shim/build-surya.sh shim/out/payload-surya-$NAME.bin
 mv shim/out/shim-boot-surya.img shim/out/shim-boot-surya-$NAME.img
 sha256sum shim/out/shim-boot-surya-$NAME.img

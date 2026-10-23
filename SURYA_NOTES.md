@@ -109,6 +109,17 @@ Sources: ios-sweet tree at fork time, and
 - Test 2 done 2026-10-23: owner holds read-only backups of persist, modemst1/2,
   fsg, fsc, boot, dtbo, vbmeta, vbmeta_system with SHA256SUMS on his PC.
 
+## Test 4 prep (2026-10-23)
+
+- CI run `xnu #1` on branch `surya` (commit `3a227cc`): **success**, 12m36s,
+  artifacts `xnu-kernel` + `xnu-buildtree`. Kernel unchanged from upstream
+  (board addresses identical, see table).
+- `tools/surya-test4.sh KERNEL` runs on the owner's PC: `mkadt.py --highmem`
+  (no /product needed for a kernel-only boot), `mkpayload.py` with
+  `cpus=1 sweettouch=0 sweetkeys=0 sweetlog=0` and **no `ufsrw`** (kernel UFS
+  driver stays read-only), then `shim/build-surya.sh`.
+- Pass criterion: kernel log scrolls on screen; expected stop at waiting for root.
+
 ## Open questions (in order)
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.

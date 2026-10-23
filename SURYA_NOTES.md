@@ -15,6 +15,23 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 16:57 — persistent log pulled (Test 5 boot).** `fastboot boot` of the
+  official LineageOS Recovery for surya (`recovery.img`, nothing flashed), Advanced →
+  Enable ADB gives `uid=0(root)`; `tools/sweet-log-pull.sh logs/test5.txt` read
+  `/dev/block/sda16` (userdata, 112556126208 bytes): `# version 1, ring 4194304,
+  total 315852 bytes, flush #154`, 4738 lines (log kept out of git: `logs/`). Findings:
+  - `SWEET UFS: "userdata" on LUN 0: first block 0x284a18, 107341 MiB, read-write`.
+  - `SWEET KEYS: arb=0x50000000 apids=512 pon-apid=200 gpio4-apid=241 ...` — SPMI arbiter
+    and both APIDs found exactly as on sweet. Events: key=0 power (HID 0x30), key=1
+    vol-up (PM6150L GPIO2, HID 0xe9), key=2 vol-down (PON resin, HID 0xea) — all three
+    deliver HID events to backboardd.
+  - `SWEET TOUCH: disabled (sweettouch=0)`; `SweetHIDTouch open by IOHIDEventServiceUserClient`.
+  - `SWEET FB: backboardd sel 12` (RequestPowerChange) on the power press; 6000 swaps logged.
+  - Only 2 crashes: `driverkitd` sig 9 (no DriverKit; harmless) and `PosterBoard` sig 5
+    (lock-screen wallpaper renderer; likely why the wallpaper is a plain gradient).
+  - Log ends with Power+Vol-down held → `exec sosd` (iOS Emergency SOS / power-off UI)
+    just before the forced reset into fastboot — expected.
+
 - **2026-10-23 ~16:35 — 🎉 MILESTONE: iOS 16.7.16 LOCK SCREEN ON THE POCO X3 NFC (surya).**
   Same Test 5 boot (cpus=1), roughly 15 min from `fastboot boot`. Photos:
   `evidence/2026-10-23-test5-LOCKSCREEN-1.jpg`, `-2.jpg` (clock advances 4:16 → 4:17, so

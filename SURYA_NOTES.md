@@ -253,6 +253,10 @@ helpers and `sweet_hid_touch`, replacing the bus (I²C → SPI on SE0) and proto
 Steps:
 - 3a read-only shim probe: GCC SE0/wrapper clock status, SE0 `GENI_FW_REVISION`
   (protocol: 1 = SPI expected), TLMM gpio8/9/49–52 config — no writes.
+  Implemented: `shim/surya_touch.c` (`-DSURYA_TOUCH_PROBE`, only in build-surya.sh),
+  runs on the no-payload path before the UFS probe. GCC: vote `0x5200c` bits 6–10,
+  CBCRs `0x17004/08/0c/14/30` (from `drivers/clk/qcom/gcc-sm7150.c`); skips SE reads if
+  the QUP0 AHB clocks report CLK_OFF.
 - 3b SPI chip-ID read from the shim (first IC transaction; reads only).
 - 3c firmware download from the shim (blob in the ramdisk) → event-buffer polling,
   print touches on screen.

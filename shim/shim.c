@@ -11,6 +11,9 @@
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
+#ifdef SURYA_TOUCH_PROBE
+#include "surya_touch.h"
+#endif
 
 #define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
@@ -383,6 +386,12 @@ void shim_main(uint64_t dtb)
 	con_str("LOADER", why);
 	con_skip();
 
+#ifdef SURYA_TOUCH_PROBE
+	/* surya: read-only touch SPI bus probe (MMU still off). */
+	stage = "touch";
+	surya_touch_probe();
+	con_skip();
+#endif
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";
 	test_ufs();

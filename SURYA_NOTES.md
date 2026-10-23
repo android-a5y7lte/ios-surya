@@ -355,7 +355,12 @@ assertion that the switcher configuration ivar (+0x98) is still nil. A second pa
 first switcher configuration **twice in one process** (the first run stores it at
 +0x98). Hypothesis: SpringBoard's `prewarm` XPC is re-sent (slow, CPU-rendered boot)
 or the first-run state is not persisted, so the "first time" branch is taken again.
-Assertion text is CFString `0x1e11644a0` (not yet read).
+Assertion text is CFString `0x1e11644a0` (not yet read; a `grep -a` for
+"witcherConfiguration" over the cache only finds selector/ivar names: `_switcherConfiguration`,
+`_stateLock_initializeEmptySwitcherConfiguration`, `_stateLock_buildSwitcherConfigurationWithContext:outMutated:`,
+`switcherConfigurationPath`, XPC entitlements `com.apple.posterboardservices.data-store.{access,mutate}SwitcherConfiguration`).
+Next: disassemble the caller in `_stateLock_updateExtensions:…` before +5308 to see
+what makes it call the first-time setup again.
 
 ## Backlight plan (research 2026-10-23)
 

@@ -404,6 +404,14 @@ Fix candidate (needs approval, writes 4 bytes in userdata): NOP the entry check
 first-time setup just rebuilds the configuration (it overwrites +0x98 and sets +0xe9).
 Reversible by writing the 4 original bytes back. Unknown: whether XNU checks shared-cache
 page hashes here (AMFI is permissive on this port).
+**Applied 2026-10-23 ~19:07 (owner approved):** cache vaddr 0x1c1777ab4 = file
+`dyld_shared_cache_arm64.19` offset 0x50cfab4 (`ipsw dyld a2o`) = **userdata byte offset
+10261637812** (0x263a42ab4; unique 64-byte match in `ios16-root.img`, same bytes read back
+from the phone first). Backup of the 4 KiB block (block 2505282) in the owner's
+`~/ios-surya/backup/userdata-blk2505282-orig.bin`. Written from LineageOS recovery:
+`printf '\037\040\003\325' | dd of=/dev/block/by-name/userdata bs=1 seek=10261637812 count=4 conv=notrunc`;
+read-back shows `1f20 03d5`. Undo: same with `'\050\066\000\265'`. The PC's
+`ios16-root.img` is still the unpatched original (reflashing it undoes the patch).
 
 ## Backlight plan (research 2026-10-23)
 

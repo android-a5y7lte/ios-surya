@@ -21,7 +21,7 @@ reference. **This file is the handoff for the surya port.**
   Voltage-based estimate (no fuel-gauge calibration); upstream's 5020 mAh nominal is
   sweet's, surya is 5160 mAh (cosmetic). Test 6 log also shows PosterBoard still
   crashes on every boot (see Wallpaper section). Owner OK with replacing the dead
-  Ubuntu Touch recovery by LineageOS recovery (flash pending).
+  Ubuntu Touch recovery by LineageOS recovery: flashed to `recovery` 2026-10-23 ~19:00, Power+VolUp now boots it (log pulls no longer need `fastboot boot`).
 
 - **2026-10-23 ~18:22 — cpus=8 + sweetfb_hz=60 boots fine** (`CPUS=8 FBHZ=60
   tools/surya-test4.sh KERNEL 5`, A76s at MPIDR 0x600/0x700 via upstream patch 0078);

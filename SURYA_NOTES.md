@@ -433,6 +433,18 @@ provider (or it never asks before building the configuration). Without PosterBoa
 os_log output this is guesswork; parked for now (patch stays, harmless). Ideas for later:
 route PosterBoard's os_log to the console (OS_ACTIVITY_DT_MODE / a libtrace hook), or
 check the LaunchServices/ExtensionKit registration of `com.apple.posterkit.provider`.
+**Follow-up 2026-10-24 (tests 9-13):** since test 9 PosterBoard no longer crashes (state
+saved by the patched test 7/8 runs); sampler (`sweetsample=PosterBoard`) shows it idle in
+its run loop. **No extension process of any kind is ever exec'd** (no widget, no poster
+provider) although pkd, lsd, runningboardd, chronod run without crashing → same root
+cause as the home-screen widgets stuck on "Waiting…": iOS does not find or does not
+launch extensions. `sweetnull`/`sweetscan` on PosterBoard, chronod, runningboardd, lsd,
+pkd, xpcproxy: silent; SpringBoard's NSLogs are empty lines; launchd only logs to the
+console for the first second. Exec log: 250 `exec xpcproxy`, 101 of them followed directly
+by another xpcproxy (no target exec) → ~100 launches fail inside xpcproxy before the
+posix_spawn print in kern_exec.c (0042). Next: kernel patch logging every failed
+exec/posix_spawn (process, path, errno) and xpcproxy exit status/reason; needs the exact
+xnu-8796.141.3 kern_exec.c/kern_exit.c (from the CI `xnu-buildtree` artifact).
 
 ## Backlight plan (research 2026-10-23)
 

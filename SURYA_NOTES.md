@@ -220,6 +220,45 @@ Sources: ios-sweet tree at fork time, and
 - `tools/surya-test4.sh KERNEL 5` = README boot-args with `cpus=1 sweettouch=0`
   (buttons on, log ring on). Writes userdata — boot only after the flash.
 
+## Touch plan (research 2026-10-23)
+
+Hardware (live DT): `spi@0x880000` `qcom,spi-geni` = QUP wrapper 0 SE0 (wrapper
+`qupv3_0_geni_se@0x8c0000`), clocks `se-clk`/`m-ahb`/`s-ahb` (GCC phandle 0x27, ids
+0x44/0x67/0x68), IRQ SPI 0x259, GPI DMA available but not required; pins
+`qupv3_se0_spi_active`: gpio49–52, function `qup00`; device `novatek,NVT-ts-spi` CS0,
+8 MHz, reset GPIO 8, irq GPIO 9 (falling), `novatek,swrst-n8-addr = 0x3f0fe`,
+`novatek,spi-rd-fast-addr = 0x3f310`; supplies vddio + LAB/IBB (panel rails, already on).
+
+Reference driver: `sm7150-mainline/linux` (HEAD `fd78d179`)
+`drivers/input/touchscreen/nt36xxx_{core,spi}.c`, `nt36xxx.h`:
+- SPI framing (`nt36xxx_spi.c`): page select `ff XX YY` (addr bits 23..16, 15..7) as one
+  write, then read = `addr&0x7f` byte followed by data; write = `(addr&0x7f)|0x80` + data.
+  SPI mode 0, 8-bit, ≤ 8 MHz.
+- Chip ID (`trim_id_table`): NT36675-class map for ids `xx xx xx 75 66 03` and
+  `0C xx xx 72 66 03`; memory map `nt36675_memory_maps` (event buffer `0x22D00`,
+  boot-ready `0x3F10D`, `SWRST_N8 0x3F0FE`, `SPI_RD_FAST 0x3F310`, eng reset `0x7FFF80`).
+- **Firmware is host-loaded at every power-on**: `request_firmware(firmware-name)` →
+  `_nt36xxx_boot_download_firmware` (ILM/DLM partitions parsed by `nvt_bin_header_parser`,
+  HW CRC check). Blob: `novatek_ts_huaxing_fw.bin` (see above).
+- Reports: `nt36xxx_report` reads `POINT_DATA_LEN` (65) bytes from the event buffer,
+  10 fingers.
+
+XNU side (sweet patch 0060 `bsd/dev/sweet_touch.c`): one polling kernel thread, GENI
+register access through `ml_io_map`, GCC clock vote + TLMM GPIO setup, delivers
+`sweet_hid_touch(finger, down, x, y)` to the existing SweetHIDTouch digitizer service
+(0062/0063 add RPMh rail + Goodix packing). A surya driver can reuse the thread, GENI
+helpers and `sweet_hid_touch`, replacing the bus (I²C → SPI on SE0) and protocol
+(Goodix → Novatek incl. firmware download).
+
+Steps:
+- 3a read-only shim probe: GCC SE0/wrapper clock status, SE0 `GENI_FW_REVISION`
+  (protocol: 1 = SPI expected), TLMM gpio8/9/49–52 config — no writes.
+- 3b SPI chip-ID read from the shim (first IC transaction; reads only).
+- 3c firmware download from the shim (blob in the ramdisk) → event-buffer polling,
+  print touches on screen.
+- 3d port into XNU as `sweet_touch` Novatek path; firmware shipped in the root image
+  or the payload.
+
 ## Open questions (in order)
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.

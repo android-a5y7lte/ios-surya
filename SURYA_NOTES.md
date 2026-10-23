@@ -15,6 +15,14 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 ~18:50 — real battery level works** with `ARGS="sweetbattery=1"`
+  (upstream's read-only PM6150 polling, SID0 0x10-0x13/0x48): status bar showed 49%;
+  log `SWEET BATTERY: PM6150 / estimated SOC, 48% 3844mV external=1 charging=1`.
+  Voltage-based estimate (no fuel-gauge calibration); upstream's 5020 mAh nominal is
+  sweet's, surya is 5160 mAh (cosmetic). Test 6 log also shows PosterBoard still
+  crashes on every boot (see Wallpaper section). Owner OK with replacing the dead
+  Ubuntu Touch recovery by LineageOS recovery (flash pending).
+
 - **2026-10-23 ~18:22 — cpus=8 + sweetfb_hz=60 boots fine** (`CPUS=8 FBHZ=60
   tools/surya-test4.sh KERNEL 5`, A76s at MPIDR 0x600/0x700 via upstream patch 0078);
   owner: scrolling "a bit better". Still CPU-rendered. Open UI issues reported by the
@@ -371,6 +379,16 @@ else set it earlier in the same process without setting +0xe9 (candidate:
 Not the keybag: the AKS stub reports lock state 0x4 = unlocked since boot (patch 0038).
 Cheap next check: pull the log of a later boot to see whether PosterBoard still crashes
 once its data store has been written by the first run.
+**Test 6 log (2026-10-23):** PosterBoard still crashes at the same place on a later boot
+(`sub 0x1d7440268 - slide 0x15cc8000 = 0x1c1778268`, the brk after the line-3431 log) and
+launchd respawns it. The test5 log (first iOS boot) shows the same crash on its first exec.
+Disassembly confirms the entry check: `ldr x8,[self,#0x98]; cbnz x8 → assert` (before any
+work), `ldrb [self,#0xe9]; cbnz → line 3432 assert`. The function itself sets +0x98 from
+`_stateLock_buildSwitcherConfigurationWithContext:outMutated:`. So +0x98 is set before the
+first call in every process: most likely loaded at init from a switcher configuration
+already on disk (shipped in the root image's /var, or written by the first run).
+Next (read-only, on the PC): loop-mount `ios16-root.img` (HFS+) read-only and look for
+PosterBoard / PosterBoardServices data under /private/var/mobile/Library.
 
 ## Backlight plan (research 2026-10-23)
 

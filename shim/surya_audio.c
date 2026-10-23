@@ -16,10 +16,19 @@
  * register-pointer writes followed by reads (page 0, 0x00-0x07 and 0x7d).
  * Same GENI I2C sequence as upstream's proven sweet touch driver (patch
  * 0060/0063, QUP1 SE1). Built only with SURYA_AUDIO=1 (-DSURYA_AUDIO_PROBE).
+ *
+ * Step A2 (SURYA_AUDIO=2): also releases both amp resets: TLMM gpio91 output
+ * high, PM6150L GPIO8 mode = digital output (if not already) and output
+ * source inverted-low = high (SPMI EXT_WRITEL to 0xc740/0xc744 only, APPS-owned
+ * APID only). TAS256x leave reset in software shutdown: no sound.
  */
 #include <stdint.h>
 #include "console.h"
 #include "surya_audio.h"
+
+#ifndef SURYA_AUDIO_STEP
+#define SURYA_AUDIO_STEP 1
+#endif
 
 #define GCC			0x00100000UL
 #define GCC_VOTE		0x5200cUL
@@ -66,6 +75,8 @@ static const uint32_t qup1_cbcr[] = { 0x18004, 0x18008, 0x1800c, 0x18010, 0x183a
 /* SPMI arbiter v5 (live DT: core 0x0c440000, obsrvr 0x0e600000, cnfg 0x0c40a000) */
 #define SP_CORE			0x0c440000UL
 #define SP_OBS			0x0e600000UL
+#define SP_CHN			0x0c600000UL
+#define SP_CFG			0x0c40a000UL
 
 static inline uint32_t rd(uintptr_t a)
 {
@@ -106,20 +117,26 @@ static int wait_clear(uintptr_t a, uint32_t mask)
 }
 
 /* ---- SPMI observer read (one byte), PM6150L GPIO8 only ---------------- */
-static int spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+static unsigned spmi_apid(unsigned sid, unsigned addr)
 {
 	unsigned ppid = (sid << 8) | (addr >> 8);
 	unsigned count = rd(SP_CORE + 4) & 0x7ff;
-	unsigned apid = 0xffff;
+	unsigned found = 0xffff;
 	if (count == 0 || count > 512)
-		return -1;
+		return 0xffff;
 	for (unsigned i = 0; i < count; i++) {
 		uint32_t map = rd(SP_CORE + 0x900 + 4 * i);
 		if (map && ((map >> 8) & 0xfff) == ppid) {
-			apid = i;
-			break;
+			if (found == 0xffff || (rd(SP_CFG + 0x700 + 4 * i) & 7) == 0)
+				found = i;
 		}
 	}
+	return found;
+}
+
+static int spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+{
+	unsigned apid = spmi_apid(sid, addr);
 	if (apid == 0xffff)
 		return -2;
 	uintptr_t ch = SP_OBS + 0x80UL * apid;
@@ -137,6 +154,30 @@ static int spmi_read(unsigned sid, unsigned addr, uint8_t *out)
 	return -4;
 }
 
+#if SURYA_AUDIO_STEP >= 2
+/* EXT_WRITEL on the APPS channel; only PM6150L GPIO8 mode / output source. */
+static int spmi_write(unsigned sid, unsigned addr, uint8_t val)
+{
+	if (sid != 4 || (addr != 0xc740 && addr != 0xc744))
+		return -1;
+	unsigned apid = spmi_apid(sid, addr);
+	if (apid == 0xffff)
+		return -2;
+	if ((rd(SP_CFG + 0x700 + 4 * apid) & 7) != 0)
+		return -5;			/* not owned by APPS (EE 0) */
+	uintptr_t ch = SP_CHN + 0x10000UL * apid;
+	wr(ch + 0x10, val);			/* WDATA0 */
+	wr(ch, (addr & 0xff) << 4);		/* EXT_WRITEL, 1 byte */
+	for (unsigned i = 0; i < 1000; i++) {
+		uint32_t st = rd(ch + 8);
+		if (st & 1)
+			return (st & 0xe) ? -3 : 0;
+		udelay(1);
+	}
+	return -4;
+}
+#endif
+
 static void pmic_gpio8(void)
 {
 	static const uint8_t regs[] = { 0x04, 0x05, 0x08, 0x10, 0x40, 0x41, 0x42, 0x44, 0x45, 0x46 };
@@ -153,10 +194,10 @@ static void pmic_gpio8(void)
 		return;
 	}
 	/* type/subtype, status1, int_rt_sts | mode, vin, pull | out_src, out_ctl, en */
-	con_hex2("PMIC GPIO8 A", "t/st/s1/rt=",
+	con_hex2("PM GPIO8", "id=",
 	    ((uint32_t)v[0] << 24) | ((uint32_t)v[1] << 16) | ((uint32_t)v[2] << 8) | v[3],
-	    "mode/vin/pull=", ((uint32_t)v[4] << 16) | ((uint32_t)v[5] << 8) | v[6]);
-	con_hex("PMIC GPIO8 B src/out/en", ((uint32_t)v[7] << 16) | ((uint32_t)v[8] << 8) | v[9]);
+	    "mo/vi/pu=", ((uint32_t)v[4] << 16) | ((uint32_t)v[5] << 8) | v[6]);
+	con_hex2("PM GPIO8", "src=", v[7], "out/en=", ((uint32_t)v[8] << 8) | v[9]);
 }
 
 /* ---- GENI I2C (copy of upstream sweet_touch.c touch_msg_run, polled) --- */
@@ -341,5 +382,28 @@ void surya_audio_probe(void)
 		return;
 	amp_probe(0x4c, "AMP 4C (right)");
 	amp_probe(0x4d, "AMP 4D (left)");
-	con_str("AUDIO", "step A1 done");
+#if SURYA_AUDIO_STEP >= 2
+	/*
+	 * Step A2: release both amplifier resets (active low): TLMM gpio91 and
+	 * PM6150L GPIO8 driven high. After reset a TAS256x sits in software
+	 * shutdown (no output), so this makes no sound. Undone by a reboot.
+	 */
+	con_str("AUDIO", "step A2: release amp resets");
+	uintptr_t c91 = CFG(TLMM_NORTH, 91);
+	wr(c91 + 4, (rd(c91 + 4) & ~2U) | 2U);		/* latch high first */
+	wr(c91, (rd(c91) & ~0x3ffU) | (1U << 9));	/* gpio, no pull, 2 mA, OE */
+	con_hex2("TLMM 91", "cfg=", rd(c91), "io=", rd(c91 + 4));
+	uint8_t mode = 0xee;
+	int e = spmi_read(4, 0xc740, &mode);
+	if (!e && (mode & 3) != 1)
+		e = spmi_write(4, 0xc740, (uint8_t)((mode & ~3U) | 1U));	/* digital output */
+	if (!e)
+		e = spmi_write(4, 0xc744, 0x80);	/* source 0 (low), inverted = high */
+	con_hex2("PM GPIO8 SET", "mode was=", mode, "err=", (uint32_t)-e);
+	pmic_gpio8();
+	udelay(20000);
+	amp_probe(0x4c, "AMP 4C (right)");
+	amp_probe(0x4d, "AMP 4D (left)");
+#endif
+	con_str("AUDIO", "probe done");
 }

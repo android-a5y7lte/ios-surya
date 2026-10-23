@@ -509,6 +509,14 @@ LPASS is reachable from the apps CPU with the ADSP off). Then iOS's audio HAL si
 Step A1 (`SURYA_AUDIO=1 shim/build-surya.sh`, no payload): GCC/TLMM/PM6150L-GPIO8 reads,
 QUP1 SE3 GENI I2C (copy of upstream's sweet touch I2C code), read TAS256x page-0 regs
 0x00-0x07 and 0x7d at 0x4c/0x4d (pointer writes + reads only). LPASS not touched yet.
+**A1 result (2026-10-23 23:56, photo `evidence/2026-10-23-audioA1-*.jpg`):** QUP1 clocks
+were all off at entry (vote 0x41000000), SE3 RCG has DFS (dfsr 0x21, level 0 XO/1),
+SE3 fw 0x303 = **I2C firmware loaded**, HW FIFOs OK, bus setup OK. gpio46/47 cfg 0
+(gpio, input), **gpio91 cfg 1 (pull-down) io 0 = reset 2 held low**; PM6150L GPIO8
+type/subtype 0x10/0x11 (GPIO MV), status1 0x80, out_src 0x00, out_ctl 0x01, en 0x80
+(mode byte cut off on screen). **Both amps NACK** (expected with resets low).
+Step A2 (`SURYA_AUDIO=2`): drive gpio91 high and PM6150L GPIO8 high (mode output,
+DIG_OUT_SOURCE_CTL 0x80 = inverted low), wait 20 ms, probe again.
 
 ## Open questions (in order)
 

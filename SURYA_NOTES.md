@@ -15,6 +15,15 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 ~18:08 — 🎉🎉 MILESTONE: iOS HOME SCREEN ON SURYA, UNLOCKED BY TOUCH.**
+  CI `xnu #2` (commit `fb711be`, patch 0082) kernel, `tools/surya-test4.sh KERNEL 5`
+  (cpus=6, `sweettouch=2`, firmware as `TouchFW` blob), `fastboot boot`. The owner swiped
+  up on the lock screen and reached the home screen (photo
+  `evidence/2026-10-23-HOMESCREEN-touch-unlock.jpg`: 4:02, charging icon, two "Waiting…"
+  widgets, Photos / App Store / Settings, search pill, dock Phone / Safari / Messages
+  with a badge). Swiping down from the top opens the notification view (iOS 16 shows it
+  as the lock screen) — normal iOS behaviour. Novatek touch works end-to-end in XNU.
+
 - **2026-10-23 17:36 — 🎉 TOUCH WORKS on surya (shim step 3c).** After the dummy-byte
   fix: `NVT BOOT ok=1`, `FWINFO valid=1 max_xy=0438 0960`, then the 60 s loop drew
   the owner's strokes across the **whole panel with 5 fingers at once** (finger 1 white,

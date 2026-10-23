@@ -1,0 +1,51 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -3344,6 +3344,28 @@
+ 	return 0;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * surya: log every exec of an app extension (path contains ".appex"), from
++ * posix_spawn and execve alike: the plain "exec NAME" line (0042) is only
++ * printed on one posix_spawn path. At most 200 lines per boot.
++ */
++static void
++sweet_log_appex(struct image_params *imgp, int error, const char *how)
++{
++	static int sweet_appex_lines;
++	if (imgp == NULL || imgp->ip_strings == NULL || sweet_appex_lines >= 200) {
++		return;
++	}
++	const char *path = imgp->ip_strings + strlen(EXECUTABLE_KEY);
++	if (strnstr(path, ".appex", MAXPATHLEN) == NULL) {
++		return;
++	}
++	sweet_appex_lines++;
++	printf("APPEX %s err %d %.200s\n", how, error, path);
++}
++#endif
++
+ /*
+  * posix_spawn
+  *
+@@ -4055,6 +4077,9 @@
+ 	 * as 0 and pretends the call succeeded.
+ 	 */
+ 	error = exec_activate_image(imgp);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	sweet_log_appex(imgp, error, "spawn");
++#endif
+ #if defined(HAS_APPLE_PAC)
+ 	ml_task_set_jop_pid_from_shared_region(new_task);
+ 	ml_task_set_disable_user_jop(new_task, imgp->ip_flags & IMGPF_NOJOP ? TRUE : FALSE);
+@@ -5032,6 +5057,9 @@
+ 	 * as 0 and pretends the call succeeded.
+ 	 */
+ 	error = exec_activate_image(imgp);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	sweet_log_appex(imgp, error, "execve");
++#endif
+ 	/* thread and task ref returned for vfexec case */
+ 
+ 	if (imgp->ip_new_thread != NULL) {

@@ -446,6 +446,12 @@ posix_spawn print in kern_exec.c (0042). Next: kernel patch logging every failed
 exec/posix_spawn (process, path, errno) and xpcproxy exit status/reason; needs the exact
 xnu-8796.141.3 kern_exec.c/kern_exit.c (from the CI `xnu-buildtree` artifact).
 Patch **0085** `surya-spawn-exit-log` (sources from the owner's buildtree (3)): `SPAWN FAIL name[pid] err N path` at posix_spawn's `bad:` label, and `EXIT name[pid] status reason ns/code` for non-zero exits (bluetoothd/fairplayd skipped), 300 lines each.
+**Test 14 (0085):** only 10 lines: early-boot ENOENT spawns by launchd/MSUEarlyBootTask,
+non-zero exits of sysstatuscheck, prng_seedctl, IOMFB_FDR_Loader, DumpPanic, aggregated,
+driverkitd (sig 9). **No xpcproxy failure at all** → the "101 xpcproxy without target"
+was a logging artifact: 0042's `exec NAME` is printed on only one posix_spawn branch, so
+the exec log is incomplete and "no extension ever exec'd" is NOT proven. Patch **0086**:
+`APPEX spawn|execve err N path` for every exec whose path contains ".appex".
 
 ## Backlight plan (research 2026-10-23)
 

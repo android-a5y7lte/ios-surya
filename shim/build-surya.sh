@@ -13,6 +13,8 @@
 #        3 (3c firmware download + touch dots; pass novatek_ts_huaxing_fw.bin
 #        as the 'payload' so it becomes the ramdisk).
 set -euo pipefail
+# Resolve the optional payload path before changing directory.
+PAYLOAD=${1:+$(realpath "$1")}
 cd "$(dirname "$0")"
 DTB=../dtb/surya/surya-boot.dtb
 [ -f "$DTB" ] || { echo "error: $DTB missing (see SURYA_NOTES.md)" >&2; exit 1; }
@@ -31,8 +33,8 @@ ld.lld -static -T shim.ld --build-id=none -N $(for o in $OBJS; do echo out/surya
 llvm-objcopy -O binary out/surya/shim.elf out/surya/Image
 size=$((16#$(llvm-nm out/surya/shim.elf | awk '$3=="_end"{print $1}')))  # no gawk strtonum (Mint ships mawk)
 truncate -s "$size" out/surya/Image
-if [ -n "${1:-}" ]; then
-	cp "$1" out/surya/ramdisk.bin
+if [ -n "$PAYLOAD" ]; then
+	cp "$PAYLOAD" out/surya/ramdisk.bin
 else
 	python3 ../tools/mkbootimg_v2.py --empty-ramdisk out/surya/ramdisk.bin
 fi

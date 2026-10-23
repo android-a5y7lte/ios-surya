@@ -33,6 +33,8 @@
  *
  * Step A5 (SURYA_AUDIO=5): first sound: CPU-generated I2S on gpio53-55, quiet
  * 500 Hz tone for 1.5 s with minimum amp gain, then amps back to shutdown.
+ * A5 result: beep heard from the bottom speaker. Now (A5b): amp 0x4c alone,
+ * then amp 0x4d alone, to map amps to speakers.
  */
 #include <stdint.h>
 #include "console.h"
@@ -457,15 +459,13 @@ static void audio_beep(void)
 {
 	static const uint8_t amps[] = { 0x4c, 0x4d };
 	uint8_t pwr[2] = { 0, 0 };
-	con_str("AUDIO", "step A5: quiet 500 Hz tone, 1.5 s");
+	con_str("AUDIO", "step A5b: one amp at a time");
 	for (unsigned a = 0; a < 2; a++) {
 		int e = i2c_read(amps[a], 0x02, &pwr[a], 1);
 		if (!e)
 			e = amp_write(amps[a], 0x03, 0x00);		/* PB_CFG1: min amp gain 8.5 dB */
 		if (!e)
 			e = amp_write(amps[a], 0x06, 0x01);		/* TDM_CFG0: 8 kHz, frame start H->L */
-		if (!e)
-			e = amp_write(amps[a], 0x02, (uint8_t)(pwr[a] & ~3U));	/* PWR_CTRL: active, sense off */
 		con_hex2(a ? "AMP 4D SETUP" : "AMP 4C SETUP", "pwr was=", pwr[a], "err=", (uint32_t)-e);
 		if (e)
 			goto shutdown;
@@ -476,8 +476,15 @@ static void audio_beep(void)
 		wr(c + 4, 0);
 		wr(c, (rd(c) & ~0x3ffU) | (1U << 9));
 	}
-	con_str("AUDIO", "streaming... (listen now)");
-	i2s_stream(2400, 12000, 2400);
+	/* 1: amp 0x4c alone, 2 s pause, 2: amp 0x4d alone (each 1.5 s tone). */
+	for (unsigned a = 0; a < 2; a++) {
+		int e = amp_write(amps[a], 0x02, (uint8_t)(pwr[a] & ~3U));	/* active, sense off */
+		con_str("AUDIO", a ? "2/2: AMP 4D only (listen)" : "1/2: AMP 4C only (listen)");
+		i2s_stream(2400, 12000, 2400);
+		(void)amp_write(amps[a], 0x02, pwr[a]);			/* back to shutdown */
+		con_hex2("AUDIO", "amp=", amps[a], "err=", (uint32_t)-e);
+		udelay(2000000);
+	}
 	con_str("AUDIO", "stream done");
 	for (unsigned n = 53; n <= 55; n++) {
 		uintptr_t c = CFG(TLMM_WEST, n);

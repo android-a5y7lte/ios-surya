@@ -552,7 +552,10 @@ status 0x24-0x2b dumped. Open risk: the amps' clock monitor may not accept the
 CPU-generated clock (then no sound, status shows it).
 **🎉 A5 result (2026-10-24 00:08): FIRST SOUND ON SURYA.** The owner heard the beep from
 the **bottom (main) speaker**; nothing reported from the earpiece/top speaker yet.
-The CPU-generated I2S at 8 kHz is accepted by at least one TAS2562. Status photo pending.
+The CPU-generated I2S at 8 kHz is accepted by at least one TAS2562. Photo
+`evidence/2026-10-24-audioA5.jpg`: both SETUP err=0, after: PWR 0x0e / 0x8e, regs 0x24-0x2b
+`04 00 51 80 00 50 41 c0` (0x4c) and `04 00 51 80 00 50 41 70` (0x4d): no obvious fault
+difference. A5 now plays amp 0x4c alone, then 0x4d alone (A5b) to map amps to speakers.
 
 ## Open questions (in order)
 

@@ -517,6 +517,16 @@ type/subtype 0x10/0x11 (GPIO MV), status1 0x80, out_src 0x00, out_ctl 0x01, en 0
 (mode byte cut off on screen). **Both amps NACK** (expected with resets low).
 Step A2 (`SURYA_AUDIO=2`): drive gpio91 high and PM6150L GPIO8 high (mode output,
 DIG_OUT_SOURCE_CTL 0x80 = inverted low), wait 20 ms, probe again.
+**A2 result (2026-10-23 23:59, photo `evidence/2026-10-23-audioA2.jpg`): BOTH AMPS ANSWER.**
+GPIO8 was mode 0 (input) with pull 4 (pull-down), en 0x80 → set to output, src 0x80 OK.
+gpio91 cfg 0x200 io 0x3. Amp 0x4c regs 00-03 = `00 00 0e 20`, 04-07 = `c6 22 09 ..`,
+0x7d = 0x10; amp 0x4d = `00 00 8e 20`, `c6 22 09 ..`, 0x7d = 0x00. Reg 0x02 = 0x0e matches
+the TAS2562 PWR_CTL reset value (software shutdown). Next: audio data path (LPASS MI2S).
+LPASS facts: sm7150 mainline uses the ADSP (q6afecc; LPI pinctrl at 0x62b52000).
+sc7180 (ADSP-less in mainline): lpasscorecc 0x62d00000, lpass_cpu hdmiif 0x62d87000 /
+lpaif 0x62f00000, lpass_hm 0x63000000, needs GCC_LPASS_CFG_NOC_SWAY_CLK (0x47018,
+not in gcc-sm7150.c). Step A3 (`SURYA_AUDIO=3`) reads those (may freeze). Plan B if
+LPASS is locked: bit-bang I2S on gpio53-56 at a low sample rate (CPU-driven beep test).
 
 ## Open questions (in order)
 

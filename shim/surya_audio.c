@@ -21,6 +21,10 @@
  * high, PM6150L GPIO8 mode = digital output (if not already) and output
  * source inverted-low = high (SPMI EXT_WRITEL to 0xc740/0xc744 only, APPS-owned
  * APID only). TAS256x leave reset in software shutdown: no sound.
+ *
+ * Step A3 (SURYA_AUDIO=3): also enables the GCC LPASS config-NoC branch if present
+ * and reads 2 words at 4 LPASS bases (sc7180 layout). May freeze the phone (force
+ * reboot: hold Power + Volume down); that itself answers the question.
  */
 #include <stdint.h>
 #include "console.h"
@@ -404,6 +408,31 @@ void surya_audio_probe(void)
 	udelay(20000);
 	amp_probe(0x4c, "AMP 4C (right)");
 	amp_probe(0x4d, "AMP 4D (left)");
+#endif
+#if SURYA_AUDIO_STEP >= 3
+	/*
+	 * Step A3: can the apps CPU reach LPASS with the ADSP off? Addresses are
+	 * sc7180's (closest mainline LPASS without ADSP); unverified on sm7150.
+	 * GCC LPASS_CFG_NOC_SWAY branch (sc7180 0x47018) is enabled first if it
+	 * exists. Each LPASS read is announced on screen BEFORE it happens: if
+	 * the phone freezes, the last line names the address that hung.
+	 */
+	con_str("AUDIO", "step A3: LPASS reachability");
+	uint32_t sway = rd(GCC + 0x47018);
+	con_hex2("GCC 47000", "47000=", rd(GCC + 0x47000), "47018=", sway);
+	if (sway != 0 && sway != 0xffffffffU && (sway & CBCR_OFF)) {
+		wr(GCC + 0x47018, sway | 1U);
+		udelay(100);
+		con_hex("GCC SWAY ON", rd(GCC + 0x47018));
+	}
+	static const uintptr_t probe[] = { 0x63000000UL, 0x62d00000UL, 0x62d87000UL, 0x62f00000UL };
+	static const char *const pname[] = { "LPASS HM GDSC", "LPASS CORE CC", "LPASS HDMIIF", "LPASS LPAIF" };
+	for (unsigned i = 0; i < 4; i++) {
+		con_hex(pname[i], probe[i]);
+		con_str("LPASS", "reading... (freeze here = blocked)");
+		uint32_t v0 = rd(probe[i]), v4 = rd(probe[i] + 4);
+		con_hex2(pname[i], "+0=", v0, "+4=", v4);
+	}
 #endif
 	con_str("AUDIO", "probe done");
 }

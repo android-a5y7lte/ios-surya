@@ -15,6 +15,14 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 ~17:07 — cpus=6 works.** `CPUS=6 tools/surya-test4.sh KERNEL 5` →
+  `shim-boot-surya-test5-cpu6.img`, `fastboot boot`: owner reports it reached the lock
+  screen much faster ("like a real iPhone") than the ~15 min cpus=1 boot. Default for
+  further surya boots: cpus=6. (Exact time not measured.)
+- **Touch firmware located:** `sm7150-mainline/firmware-xiaomi-surya` (commit `971dfbf9`)
+  `usr/lib/firmware/qcom/sm7150/xiaomi/surya/novatek_ts_huaxing_fw.bin`, 139264 bytes,
+  SHA256 `4e519856…6aab` (Tianma variant alongside). Kept out of git (vendor blob).
+
 - **2026-10-23 16:57 — persistent log pulled (Test 5 boot).** `fastboot boot` of the
   official LineageOS Recovery for surya (`recovery.img`, nothing flashed), Advanced →
   Enable ADB gives `uid=0(root)`; `tools/sweet-log-pull.sh logs/test5.txt` read

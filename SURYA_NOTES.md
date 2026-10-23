@@ -273,8 +273,22 @@ Steps:
   (4.8 MHz), packing 0x7f8fe/0xffefe (geni_se_config_packing 8/4/MSB); full-duplex
   M_CMD 3. Reads: chip ID at `0x1F64E` (6 bytes after cmd+dummy), fw state at
   `0x22D00|0x60`. No IC writes besides page-select frames.
+  **Result 2026-10-23 17:28** (`evidence/2026-10-23-touch-3b-chip-id.jpg`): SE0 RCG
+  cfg 0x00100000, **DFSR 0x21 (DFS on), level 0 = XO/1** → used as is; SE0 CBCR
+  0x4220 (on), vote 0x410007c0; gpio49/52 0x1 → 0x88; gpio8 (reset) cfg 0x1 input
+  pull-down io 0 (= reset deasserted per mainline GPIOD_OUT_LOW); gpio9 io 0;
+  SE0 m_clk_cfg 0x41, word 4. **NVT ID rc 0, bytes `0C 00 00 72 66 03`** = mainline
+  trim entry `{0x0C,FF,FF,0x72,0x66,0x03}` → NT36675 memory map, hw_crc 2. **SPI to the
+  touch IC works.** NVT STATE bytes `1A 4C 28 32…`, fw_state 0x4C (not 0xA0–0xAF) →
+  no firmware running, as expected.
 - 3c firmware download from the shim (blob in the ramdisk) → event-buffer polling,
-  print touches on screen.
+  print touches on screen. Implemented (`SURYA_TOUCH_STEP=3`, firmware as ramdisk):
+  streaming FIFO SPI (TX-only / full duplex, 16-word FIFO), eng reset 0x5a@0x7FFF80,
+  bootloader reset 0x69@0x3F0FE + 0@0x3F310, header parse (blob: ILM bin 0x100 → SRAM 0
+  size 0x12ec7, DLM bin 0x18100 → 0x27140 size 0x41ef, 13 info sections, no overlay,
+  FW_VER 0xc3/0x3c), partition writes in 4 KiB chunks, ILM/DLM descriptors, CRC enable,
+  0xae host cmd, boot ready, wait fw_state A0–AF, then 60 s of event-buffer polling
+  drawing dots at touch positions.
 - 3d port into XNU as `sweet_touch` Novatek path; firmware shipped in the root image
   or the payload.
 

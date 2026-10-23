@@ -9,6 +9,9 @@
 #
 # Usage: shim/build-surya.sh [payload.bin]   -> shim/out/shim-boot-surya.img
 #        (no payload = empty ramdisk = shim diagnostics only)
+# Touch bring-up: SURYA_TOUCH_STEP=1 (3a probe, default), 2 (3b chip ID),
+#        3 (3c firmware download + touch dots; pass novatek_ts_huaxing_fw.bin
+#        as the 'payload' so it becomes the ramdisk).
 set -euo pipefail
 cd "$(dirname "$0")"
 DTB=../dtb/surya/surya-boot.dtb

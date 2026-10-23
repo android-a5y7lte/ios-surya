@@ -233,7 +233,13 @@ static void se_spi_init(void)
 	con_hex2("SPI SE0", "m_cfg=", rd(se + GENI_SER_M_CLK_CFG), "word=", rd(se + SE_SPI_WORD_LEN));
 }
 
-/* One full-duplex transfer, CS held for its whole length. len <= 32. */
+#define SPI_TX_ONLY		1u
+#define FIFO_WORDS		16u	/* SE_HW_PARAM_0 bits 21:16 = 0x10 on surya */
+
+/*
+ * One SPI transfer with CS held for its whole length, FIFO polled.
+ * rx == NULL: TX only (no RX FIFO traffic). Any length up to 64 KiB.
+ */
 static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned len)
 {
 	uintptr_t se = QUP0_SE0;
@@ -241,36 +247,46 @@ static int spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned len)
 		return -1;
 	wr(se + SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
 	wr(se + SE_SPI_TX_TRANS_LEN, len);
-	wr(se + SE_SPI_RX_TRANS_LEN, len);
-	wr(se + SE_GENI_M_CMD0, SPI_FULL_DUPLEX << 27);
-	for (unsigned i = 0; i < len; i += 4) {
-		uint32_t w = 0;
-		for (unsigned b = 0; b < 4 && i + b < len; b++)
-			w |= (uint32_t)tx[i + b] << (8 * b);
-		wr(se + SE_GENI_TX_FIFO, w);
-	}
-	uint64_t end = ticks() + 192000;	/* 10 ms */
-	uint32_t irq;
-	while (!((irq = rd(se + SE_GENI_M_IRQ_STATUS)) & (M_CMD_DONE | M_ERRORS)))
+	wr(se + SE_SPI_RX_TRANS_LEN, rx ? len : 0);
+	wr(se + SE_GENI_M_CMD0, (rx ? SPI_FULL_DUPLEX : SPI_TX_ONLY) << 27);
+	unsigned sent = 0, got = 0;
+	uint64_t end = ticks() + 19200000;	/* 1 s */
+	uint32_t irq = 0;
+	for (;;) {
+		while (sent < len && (rd(se + SE_GENI_TX_FIFO_STATUS) & 0xfffffffu) < FIFO_WORDS) {
+			uint32_t w = 0;
+			for (unsigned b = 0; b < 4 && sent < len; b++, sent++)
+				w |= (uint32_t)(tx ? tx[sent] : 0) << (8 * b);
+			wr(se + SE_GENI_TX_FIFO, w);
+		}
+		if (rx) {
+			unsigned words = rd(se + SE_GENI_RX_FIFO_STATUS) & 0x1ffffffu;
+			while (words--) {
+				uint32_t v = rd(se + SE_GENI_RX_FIFO);
+				for (unsigned b = 0; b < 4 && got < len; b++)
+					rx[got++] = (uint8_t)(v >> (8 * b));
+			}
+		}
+		irq = rd(se + SE_GENI_M_IRQ_STATUS);
+		if ((irq & M_ERRORS) || ((irq & M_CMD_DONE) && sent >= len && (!rx || got >= len)))
+			break;
 		if (ticks() > end) {
 			wr(se + SE_GENI_M_CMD_CTRL, 1u << 1);	/* cancel */
 			return -2;
 		}
-	unsigned got = 0, words = rd(se + SE_GENI_RX_FIFO_STATUS) & 0x1ffffffu;
-	for (unsigned w = 0; w < words; w++) {
-		uint32_t v = rd(se + SE_GENI_RX_FIFO);
-		for (unsigned b = 0; b < 4 && got < len; b++)
-			rx[got++] = (uint8_t)(v >> (8 * b));
 	}
 	wr(se + SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
-	return (irq & M_ERRORS) ? -3 : (int)got;
+	return (irq & M_ERRORS) ? -3 : (int)len;
 }
 
 /* Novatek read: page select ff a[23:16]... then (addr & 0x7f), dummy, data. */
 static int nvt_read(uint32_t addr, uint8_t *buf, unsigned n)
 {
-	uint8_t tx[32] = { 0xff, (uint8_t)(addr >> 15), (uint8_t)(addr >> 7) }, rx[32];
-	int r = spi_xfer(tx, rx, 3);
+	uint8_t tx[80], rx[80];
+	if (n + 2 > sizeof(tx))
+		return -4;
+	tx[0] = 0xff; tx[1] = (uint8_t)(addr >> 15); tx[2] = (uint8_t)(addr >> 7);
+	int r = spi_xfer(tx, 0, 3);
 	if (r < 0)
 		return r;
 	for (unsigned i = 0; i < sizeof(tx); i++)
@@ -286,7 +302,228 @@ static int nvt_read(uint32_t addr, uint8_t *buf, unsigned n)
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 
-void surya_touch_spi_test(void)
+#if SURYA_TOUCH_STEP >= 3
+/*
+ * Step 3c: download the touch firmware and show touches on screen.
+ * Port of sm7150-mainline nt36xxx_core.c: eng_reset_idle, bootloader_reset,
+ * nvt_bin_header_parser, download_firmware_hw_crc, boot_download (hw_crc = 2,
+ * NT36675 memory map, chip id 0c xx xx 72 66 03). The firmware blob
+ * (novatek_ts_huaxing_fw.bin) is the boot image ramdisk. Writes go only to the
+ * touch IC's SRAM/registers; it forgets everything on power loss.
+ */
+#include "fdt.h"
+
+#define NVT_EVENT_BUF		0x22d00u
+#define NVT_BOOT_RDY		0x3f10du
+#define NVT_ILM_LEN		0x3f118u
+#define NVT_DLM_LEN		0x3f130u
+#define NVT_ILM_DES		0x3f128u
+#define NVT_DLM_DES		0x3f12cu
+#define NVT_G_ILM_CRC		0x3f100u
+#define NVT_G_DLM_CRC		0x3f104u
+#define NVT_BLD_CRC_EN		0x3f30eu
+#define NVT_SPI_RD_FAST		0x3f310u
+#define NVT_SWRST_N8		0x3f0feu
+#define NVT_ENG_RST		0x7fff80u
+#define NVT_CHUNK		4096u
+#define TOUCH_W			1080
+#define TOUCH_H			2400
+
+static uint8_t wbuf[NVT_CHUNK + 4];
+
+static int nvt_page(uint32_t addr)
+{
+	uint8_t p[3] = { 0xff, (uint8_t)(addr >> 15), (uint8_t)(addr >> 7) };
+	return spi_xfer(p, 0, 3);
+}
+
+static int nvt_write(uint32_t addr, const uint8_t *data, unsigned n)
+{
+	while (n) {
+		unsigned c = n > NVT_CHUNK ? NVT_CHUNK : n;
+		int r = nvt_page(addr);
+		if (r < 0)
+			return r;
+		wbuf[0] = (addr & 0x7f) | 0x80;
+		for (unsigned i = 0; i < c; i++)
+			wbuf[1 + i] = data[i];
+		r = spi_xfer(wbuf, 0, c + 1);
+		if (r < 0)
+			return r;
+		addr += c; data += c; n -= c;
+	}
+	return 0;
+}
+
+static int nvt_w8(uint32_t addr, uint8_t v) { return nvt_write(addr, &v, 1); }
+
+static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+static int nvt_bootloader_reset(void)
+{
+	int r = nvt_w8(NVT_SWRST_N8, 0x69);
+	sleep_us(35000);
+	if (r == 0)
+		r = nvt_w8(NVT_SPI_RD_FAST, 0);
+	return r;
+}
+
+struct part { uint32_t bin, sram, size, crc; };
+
+static int nvt_download(const uint8_t *fw, uint32_t fwsize)
+{
+	/* find the size actually written: last 4 KiB block ending in "NVT"/"MOD" */
+	uint32_t need = 0;
+	for (uint32_t i = fwsize / 4096; i > 0 && !need; i--) {
+		const uint8_t *m = fw + i * 4096 - 3;
+		if ((m[0] == 'N' && m[1] == 'V' && m[2] == 'T') || (m[0] == 'M' && m[1] == 'O' && m[2] == 'D'))
+			need = i * 4096;
+	}
+	if (!need) {
+		con_str("NVT FW", "no NVT/MOD marker: not a Novatek blob");
+		return -10;
+	}
+	if (((fw[need - 4096] + fw[need - 4095]) & 0xff) != 0xff) {
+		con_hex2("NVT FW", "ver=", fw[need - 4096], "bar=", fw[need - 4095]);
+		return -11;
+	}
+	con_hex2("NVT FW", "size=", fwsize, "fw_ver=", fw[need - 4096]);
+
+	/* nvt_bin_header_parser, ilm_dlm_num = 2 */
+	struct part p[24];
+	uint32_t end = le32(fw), info = 0;
+	for (uint32_t pos = 0x30; pos < end; pos += 0x10)
+		info++;
+	uint32_t ovly = (fw[0x28] & 0x10) ? (fw[0x28] & 0x0f) : 0;
+	uint32_t nparts = 2 + info + ovly;
+	if (nparts > 24)
+		return -12;
+	for (uint32_t l = 0; l < nparts; l++) {
+		const uint8_t *h;
+		if (l < 2) {
+			p[l].bin = le32(fw + l * 12);
+			p[l].sram = le32(fw + 4 + l * 12);
+			p[l].size = le32(fw + 8 + l * 12);
+			p[l].crc = le32(fw + 0x18 + l * 4);
+			continue;
+		}
+		h = l < 2 + info ? fw + 0x30 + 0x10 * (l - 2) : fw + p[1].bin + 0x10 * (l - 2 - info);
+		p[l].sram = le32(h); p[l].size = le32(h + 4); p[l].bin = le32(h + 8); p[l].crc = le32(h + 12);
+		if (p[l].bin + p[l].size > fwsize)
+			return -13;
+	}
+	con_hex2("NVT PARTS", "n=", nparts, "info/ovly=", info << 16 | ovly);
+	con_hex2("NVT ILM", "sram=", p[0].sram, "size=", p[0].size);
+	con_hex2("NVT DLM", "sram=", p[1].sram, "size=", p[1].size);
+
+	/* download_firmware_hw_crc */
+	int r = nvt_bootloader_reset();
+	if (r)
+		return r;
+	for (uint32_t l = 0; l < nparts; l++) {
+		if (!p[l].size)
+			continue;
+		r = nvt_write(p[l].sram, fw + p[l].bin, p[l].size + 1);
+		if (r)
+			return r;
+	}
+	/* ILM / DLM descriptors: 3-byte address, 3-byte length, 4-byte CRC (LE) */
+	uint8_t v[4];
+	for (int l = 0; l < 2; l++) {
+		v[0] = p[l].sram; v[1] = p[l].sram >> 8; v[2] = p[l].sram >> 16;
+		nvt_write(l ? NVT_DLM_DES : NVT_ILM_DES, v, 3);
+		v[0] = p[l].size; v[1] = p[l].size >> 8; v[2] = p[l].size >> 16;
+		nvt_write(l ? NVT_DLM_LEN : NVT_ILM_LEN, v, 3);
+		v[0] = p[l].crc; v[1] = p[l].crc >> 8; v[2] = p[l].crc >> 16; v[3] = p[l].crc >> 24;
+		nvt_write(l ? NVT_G_DLM_CRC : NVT_G_ILM_CRC, v, 4);
+	}
+	uint8_t c = 0;
+	nvt_read(NVT_BLD_CRC_EN, &c, 1);
+	nvt_w8(NVT_BLD_CRC_EN, c | 0x80);			/* bootloader CRC enable */
+	nvt_w8(NVT_EVENT_BUF | 0x60, 0);			/* clear reset-complete */
+	nvt_w8(NVT_EVENT_BUF | 0x50, 0xae);			/* enable fw CRC */
+	nvt_w8(NVT_BOOT_RDY, 1);				/* boot ready */
+	sleep_us(10000);
+
+	uint8_t st[8] = { 0 };
+	int ok = 0;
+	for (int i = 0; i < 50 && !ok; i++) {
+		if (nvt_read(NVT_EVENT_BUF | 0x60, st, 6) == 0 && st[1] >= 0xa0 && st[1] <= 0xaf)
+			ok = 1;
+		else
+			sleep_us(10000);
+	}
+	con_hex2("NVT BOOT", "ok=", ok, "fw_state=", st[1]);
+	uint8_t info16[16] = { 0 };
+	nvt_read(NVT_EVENT_BUF | 0x78, info16, 16);
+	con_hex2("NVT FWINFO", "b0-3=", be32(info16), "b4-7=", be32(info16 + 4));
+	return ok ? 0 : -14;
+}
+
+static void dot(int x, int y, uint32_t color)
+{
+	for (int dy = -8; dy <= 8; dy++)
+		for (int dx = -8; dx <= 8; dx++) {
+			int px = x + dx, py = y + dy;
+			if (px >= 0 && px < FB_W && py >= 0 && py < FB_H)
+				con_fb[py * (FB_STRIDE / 4) + px] = color;
+		}
+}
+
+static void nvt_touch_loop(unsigned seconds)
+{
+	con_str("TOUCH", "draw on the screen now!");
+	uint64_t end = ticks() + (uint64_t)seconds * 19200000;
+	unsigned events = 0, printed = 0;
+	while (ticks() < end) {
+		uint8_t pt[66];
+		if (nvt_read(NVT_EVENT_BUF, pt, sizeof(pt)) != 0) {
+			sleep_us(20000);
+			continue;
+		}
+		for (int i = 0; i < 10; i++) {
+			const uint8_t *q = pt + 6 * i + 1;
+			int id = q[0] >> 3, st = q[0] & 7;
+			if (id == 0 || id > 10 || (st != 1 && st != 2))
+				continue;
+			int x = (q[1] << 4) | (q[3] >> 4), y = (q[2] << 4) | (q[3] & 0xf);
+			if (x >= TOUCH_W || y >= TOUCH_H)
+				continue;
+			dot(x, y, id == 1 ? WHITE : (id == 2 ? GREEN : YELLOW));
+			events++;
+			if (printed < 6 && (events % 25) == 1) {
+				con_hex2("TOUCH XY", "x=", x, "y=", y);
+				printed++;
+			}
+		}
+		sleep_us(8000);
+	}
+	con_hex("TOUCH EVENTS", events);
+}
+
+static void surya_touch_fw(uintptr_t dtb)
+{
+	uint64_t lo = 0, hi = 0;
+	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &lo) || !fdt_chosen_u64(dtb, "linux,initrd-end", &hi) || hi <= lo) {
+		con_str("NVT FW", "no ramdisk: build with the firmware as ramdisk");
+		return;
+	}
+	con_str("TOUCH", "step 3c: firmware download");
+	/* eng_reset_idle */
+	nvt_w8(NVT_ENG_RST, 0x5a);
+	sleep_us(45000);
+	int r = nvt_bootloader_reset();
+	uint8_t id[8] = { 0 };
+	nvt_read(0x1f64e, id, 6);
+	con_hex2("NVT ID2", "rc=", (uint32_t)r, "b0-3=", be32(id));
+	r = nvt_download((const uint8_t *)lo, (uint32_t)(hi - lo));
+	con_hex("NVT DOWNLOAD rc", (uint32_t)r);
+	if (r == 0)
+		nvt_touch_loop(60);
+}
+#endif
+
+void surya_touch_spi_test(uintptr_t dtb)
 {
 	con_str("TOUCH", "step 3b: SPI chip ID read");
 	if (!clocks_on())
@@ -310,5 +547,10 @@ void surya_touch_spi_test(void)
 	r = nvt_read(0x22d00 | 0x60, st, 6);	/* event buf | RESET_COMPLETE */
 	con_hex2("NVT STATE", "rc=", (uint32_t)r, "b0-3=", be32(st));
 	con_hex2("NVT STATE", "fw_state=", st[1], "(a3=running)", st[1] == 0xa3);
+#if SURYA_TOUCH_STEP >= 3
+	surya_touch_fw(dtb);
+#else
+	(void)dtb;
+#endif
 }
 #endif

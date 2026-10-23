@@ -392,7 +392,7 @@ void shim_main(uint64_t dtb)
 	surya_touch_probe();
 	con_skip();
 #if defined(SURYA_TOUCH_STEP) && SURYA_TOUCH_STEP >= 2
-	surya_touch_spi_test();
+	surya_touch_spi_test(dtb);
 	con_skip();
 #endif
 #endif

@@ -335,6 +335,24 @@ Steps:
   automatically when `research/fw/novatek_ts_huaxing_fw.bin` exists (SURYA_TOUCH=0 to
   disable). Syntax-checked locally with clang against stub headers; needs a CI build.
 
+## Backlight plan (research 2026-10-23)
+
+- Hardware: live DT `qcom,wled@d800` on **PM6150L SID 5**, `qcom,pm6150l-spmi-wled`, ctrl
+  `0xd800`, sink `0xd900`, string-cfg 0x07, fs-current 25 mA, CABC on. Mainline
+  `drivers/video/backlight/qcom-wled.c`: `qcom,pm6150l-wled` = **WLED5**; brightness =
+  15-bit LE at sink+0x53/0x54 (MOD_A) or +0x63/0x64 (MOD_B), then sync toggle at
+  sink+0x65 (write 0, then bit0/bit1); module select per string at sink+0x73+n*0x10.
+  Read SRC_SEL / brightness first to learn which module ABL uses.
+- Kernel SPMI today (patch 0062 `sweet_spmi.c`) is read-only; need an EXT_WRITEL path
+  (PMIC arbiter v5, `arb=0x50000000` in the log; opcode 0 in the channel CMD register,
+  WDATA0 first) for APID of PPID 0x5d9 if APPS owns it.
+- iOS side: backboardd looks for an IOService with `IOPropertyMatch backlight-control =
+  true` and for `IODeviceTree:/backlight` (both "none" in `logs/test5.txt` lines 885/889).
+  Next: dump the real D22AP `/backlight` node (owner's `research/ipsw-x/d22ap.adt`) and
+  add a `SweetBacklight` service with those properties that logs every property set /
+  user-client call (IOKit trace, patch 0049), then map the value to WLED brightness.
+  Same service gives real screen-off (brightness 0) for the power button.
+
 ## Open questions (in order)
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.

@@ -347,6 +347,15 @@ server:prewarmWithCompletion:` ← `PRSServer prewarmWithCompletion:` (XPC from
 SpringBoard). So the very first poster ("switcher") configuration can't be built —
 most likely no poster extension/descriptor was found. Next: disassemble around +2040
 for the assert text.
+**Disassembly (owner's `ipsw dyld disass --vaddr 0x1c1777a70`):** the method starts with
+`ldr x8, [self, #0x98]; cbnz x8, → assert` — the brk at +2040 is the "failure in
+%{public}@ of <%{public}@:%p> (%{public}@:%i)" path, line 0xd67 (3431), i.e. an
+assertion that the switcher configuration ivar (+0x98) is still nil. A second path
+(+0x7b4, line 3432) asserts on byte ivar +0xe9. So PosterBoard is asked to set up the
+first switcher configuration **twice in one process** (the first run stores it at
++0x98). Hypothesis: SpringBoard's `prewarm` XPC is re-sent (slow, CPU-rendered boot)
+or the first-run state is not persisted, so the "first time" branch is taken again.
+Assertion text is CFString `0x1e11644a0` (not yet read).
 
 ## Backlight plan (research 2026-10-23)
 

@@ -289,6 +289,13 @@ Steps:
   FW_VER 0xc3/0x3c), partition writes in 4 KiB chunks, ILM/DLM descriptors, CRC enable,
   0xae host cmd, boot ready, wait fw_state A0–AF, then 60 s of event-buffer polling
   drawing dots at touch positions.
+  **Try 1, 2026-10-23 17:33** (`evidence/2026-10-23-touch-3c-fw-try1.jpg`): ramdisk
+  0x22000 bytes; ID2 after eng/bootloader reset still `0C 00 00 72`; 15 parts, ILM
+  0x12ec7, DLM 0x41ef. `NVT BOOT ok=0` (checked the wrong byte) but **`NVT FWINFO`
+  `C3 3C 12 24 04 38 09 60` = fw_ver 0xC3 / ~0x3C, 18×36 sensor, max 1080×2400 —
+  the downloaded firmware IS running.** Bug: Linux regmap buffers keep the SPI dummy
+  byte at [0], so Linux `buf[1]` = our `[0]`; fixed in the reset-state check and the
+  point parser (`pt + 6*i`, 65 bytes). Touch loop now runs if FWINFO is valid.
 - 3d port into XNU as `sweet_touch` Novatek path; firmware shipped in the root image
   or the payload.
 

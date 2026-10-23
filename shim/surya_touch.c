@@ -448,16 +448,20 @@ static int nvt_download(const uint8_t *fw, uint32_t fwsize)
 	uint8_t st[8] = { 0 };
 	int ok = 0;
 	for (int i = 0; i < 50 && !ok; i++) {
-		if (nvt_read(NVT_EVENT_BUF | 0x60, st, 6) == 0 && st[1] >= 0xa0 && st[1] <= 0xaf)
+		/* Linux buf[1] == our st[0]: its regmap buffer keeps the dummy byte at [0] */
+		if (nvt_read(NVT_EVENT_BUF | 0x60, st, 6) == 0 && st[0] >= 0xa0 && st[0] <= 0xaf)
 			ok = 1;
 		else
 			sleep_us(10000);
 	}
-	con_hex2("NVT BOOT", "ok=", ok, "fw_state=", st[1]);
+	con_hex2("NVT BOOT", "ok=", ok, "st0-3=", be32(st));
+	/* fw info: fw_ver, ~fw_ver, x_num, y_num, abs_x_max (BE16), abs_y_max (BE16) */
 	uint8_t info16[16] = { 0 };
 	nvt_read(NVT_EVENT_BUF | 0x78, info16, 16);
 	con_hex2("NVT FWINFO", "b0-3=", be32(info16), "b4-7=", be32(info16 + 4));
-	return ok ? 0 : -14;
+	int fw_ok = ((info16[0] + info16[1]) & 0xff) == 0xff;
+	con_hex2("NVT FWINFO", "valid=", fw_ok, "max_xy=", (uint32_t)(info16[4] << 8 | info16[5]) << 16 | (info16[6] << 8 | info16[7]));
+	return (ok || fw_ok) ? 0 : -14;
 }
 
 static void dot(int x, int y, uint32_t color)
@@ -476,13 +480,13 @@ static void nvt_touch_loop(unsigned seconds)
 	uint64_t end = ticks() + (uint64_t)seconds * 19200000;
 	unsigned events = 0, printed = 0;
 	while (ticks() < end) {
-		uint8_t pt[66];
+		uint8_t pt[65];		/* Linux point[1..65]; its point[0] is the dummy byte */
 		if (nvt_read(NVT_EVENT_BUF, pt, sizeof(pt)) != 0) {
 			sleep_us(20000);
 			continue;
 		}
 		for (int i = 0; i < 10; i++) {
-			const uint8_t *q = pt + 6 * i + 1;
+			const uint8_t *q = pt + 6 * i;
 			int id = q[0] >> 3, st = q[0] & 7;
 			if (id == 0 || id > 10 || (st != 1 && st != 2))
 				continue;
@@ -546,7 +550,7 @@ void surya_touch_spi_test(uintptr_t dtb)
 	uint8_t st[8] = { 0 };
 	r = nvt_read(0x22d00 | 0x60, st, 6);	/* event buf | RESET_COMPLETE */
 	con_hex2("NVT STATE", "rc=", (uint32_t)r, "b0-3=", be32(st));
-	con_hex2("NVT STATE", "fw_state=", st[1], "(a3=running)", st[1] == 0xa3);
+	con_hex2("NVT STATE", "fw_state=", st[0], "(a3=running)", st[0] == 0xa3);
 #if SURYA_TOUCH_STEP >= 3
 	surya_touch_fw(dtb);
 #else

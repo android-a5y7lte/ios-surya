@@ -34,7 +34,9 @@
  * Step A5 (SURYA_AUDIO=5): first sound: CPU-generated I2S on gpio53-55, quiet
  * 500 Hz tone for 1.5 s with minimum amp gain, then amps back to shutdown.
  * A5 result: beep heard from the bottom speaker. Now (A5b): amp 0x4c alone,
- * then amp 0x4d alone, to map amps to speakers.
+ * then amp 0x4d alone, to map amps to speakers. A5b: both beeps heard from the
+ * bottom. A5c: 0x4c 500 Hz, 0x4d 1 kHz, 4x louder (about -12 dBFS), 2 s each,
+ * PWR_CTRL of both amps and status read around each phase.
  */
 #include <stdint.h>
 #include "console.h"
@@ -409,7 +411,8 @@ static inline void pad(uintptr_t io, unsigned high)
 	*(volatile uint32_t *)io = high ? 2U : 0U;	/* posted store, ~40 ns */
 }
 
-static void i2s_stream(unsigned frames_silence1, unsigned frames_tone, unsigned frames_silence2)
+static void i2s_stream(unsigned frames_silence1, unsigned frames_tone, unsigned frames_silence2,
+    unsigned step, unsigned shift)
 {
 	uintptr_t bclk = CFG(TLMM_WEST, 53) + 4, ws = CFG(TLMM_WEST, 54) + 4, sd = CFG(TLMM_WEST, 55) + 4;
 	unsigned total = frames_silence1 + frames_tone + frames_silence2;
@@ -419,7 +422,7 @@ static void i2s_stream(unsigned frames_silence1, unsigned frames_tone, unsigned 
 	for (unsigned f = 0; f < total; f++) {
 		int32_t smp = 0;
 		if (f >= frames_silence1 && f < frames_silence1 + frames_tone)
-			smp = sine16[f & 15];
+			smp = sine16[(f * step) & 15] << shift;	/* step 1 = 500 Hz, 2 = 1 kHz; shift 2 = x4 (+12 dB) */
 		uint32_t word = (uint32_t)smp << 8;	/* 24-bit sample, MSB first in a 32-bit slot */
 		for (unsigned bit = 0; bit < 64; bit++) {
 			/*
@@ -459,7 +462,7 @@ static void audio_beep(void)
 {
 	static const uint8_t amps[] = { 0x4c, 0x4d };
 	uint8_t pwr[2] = { 0, 0 };
-	con_str("AUDIO", "step A5b: one amp at a time");
+	con_str("AUDIO", "step A5c: one amp at a time, louder");
 	for (unsigned a = 0; a < 2; a++) {
 		int e = i2c_read(amps[a], 0x02, &pwr[a], 1);
 		if (!e)
@@ -476,13 +479,23 @@ static void audio_beep(void)
 		wr(c + 4, 0);
 		wr(c, (rd(c) & ~0x3ffU) | (1U << 9));
 	}
-	/* 1: amp 0x4c alone, 2 s pause, 2: amp 0x4d alone (each 1.5 s tone). */
+	/*
+	 * 1: amp 0x4c alone, LOW tone (500 Hz); 2 s pause; 2: amp 0x4d alone,
+	 * HIGH tone (1 kHz). Each 2 s at about -12 dBFS (4x A5), min amp gain.
+	 * Both amps' PWR_CTRL and status are read right before and after.
+	 */
 	for (unsigned a = 0; a < 2; a++) {
+		uint8_t p0 = 0, p1 = 0, st[8] = {0};
 		int e = amp_write(amps[a], 0x02, (uint8_t)(pwr[a] & ~3U));	/* active, sense off */
-		con_str("AUDIO", a ? "2/2: AMP 4D only (listen)" : "1/2: AMP 4C only (listen)");
-		i2s_stream(2400, 12000, 2400);
+		(void)i2c_read(0x4c, 0x02, &p0, 1);
+		(void)i2c_read(0x4d, 0x02, &p1, 1);
+		con_hex2(a ? "2/2 4D 1kHz" : "1/2 4C 500Hz", "pwr4c=", p0, "pwr4d=", p1);
+		i2s_stream(2400, 16000, 2400, a ? 2 : 1, 2);
+		(void)i2c_read(amps[a], 0x24, st, 8);
 		(void)amp_write(amps[a], 0x02, pwr[a]);			/* back to shutdown */
-		con_hex2("AUDIO", "amp=", amps[a], "err=", (uint32_t)-e);
+		con_hex2(a ? "2/2 4D st" : "1/2 4C st",
+		    "", ((uint32_t)st[0] << 24) | ((uint32_t)st[1] << 16) | ((uint32_t)st[2] << 8) | st[3],
+		    e ? "ERR " : "", ((uint32_t)st[4] << 24) | ((uint32_t)st[5] << 16) | ((uint32_t)st[6] << 8) | st[7]);
 		udelay(2000000);
 	}
 	con_str("AUDIO", "stream done");

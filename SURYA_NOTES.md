@@ -490,6 +490,26 @@ SweetBacklight yet). The Control Center volume slider no longer reacts to draggi
 the hardware volume keys still change the level and show the HUD (no audio hardware
 anyway); probably a touch/gesture issue in that module, low priority.
 
+## Audio plan (research 2026-10-23)
+
+Facts from the live DT (`surya-dump/live.dts`):
+- Sound card `sm6150-wcd9375-snd-card` (`qcom,sm6150-asoc-snd`): Bolero digital codec
+  (rx/tx/va macros) + WCD9375 (headphone/mic), everything through the **ADSP** (q6 AFE/APR;
+  `qcom,lpass@62400000` = `pil-tz-generic`, pas-id 1, firmware "adsp").
+- Speakers: **two TI TAS256x** (`ti,tas256x`, left 0x4d, right 0x4c, stereo) on
+  `i2c@0xa8c000` = **QUP1 SE3** (global SE9), pins gpio46/47 func qup13 (NORTH),
+  reset PM6150L GPIO8 (active low, DT default output-low) and TLMM gpio91, irq gpio58/30.
+  Audio data over **tertiary MI2S** (gpio53-56, func ter_mi2s, WEST), msm-mi2s-master.
+- Haptics: awinic aw8624 (not audio). fsa4480 USB-C audio switch at 0x43 on the same bus.
+- GCC: QUP1 S3 CBCR 0x183a4, RCG 0x183a8, vote 0x5200c bits 18-21 + 25.
+
+Plan: milestone 1 = a beep from the shim without the ADSP (TAS256x over I2C + LPASS
+LPAIF MI2S/DMA driven directly, as Linux does on sc7180 Chromebooks; **unknown** whether
+LPASS is reachable from the apps CPU with the ADSP off). Then iOS's audio HAL side.
+Step A1 (`SURYA_AUDIO=1 shim/build-surya.sh`, no payload): GCC/TLMM/PM6150L-GPIO8 reads,
+QUP1 SE3 GENI I2C (copy of upstream's sweet touch I2C code), read TAS256x page-0 regs
+0x00-0x07 and 0x7d at 0x4c/0x4d (pointer writes + reads only). LPASS not touched yet.
+
 ## Open questions (in order)
 
 1. ~~Live DT of this phone~~ — done 2026-10-23, see above.

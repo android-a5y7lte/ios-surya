@@ -21,9 +21,12 @@ DTB=../dtb/surya/surya-boot.dtb
 CC="clang --target=aarch64-linux-gnu"
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -fno-jump-tables -fno-builtin-strcmp \
  -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DSURYA_TOUCH_PROBE -DSURYA_TOUCH_STEP=${SURYA_TOUCH_STEP:-1}"
-OBJS="start shim console mmu fdt loader ufs compat surya_touch"
+# Audio bring-up: SURYA_AUDIO=1 runs the speaker amp probe (surya_audio.c)
+# instead of the touch probe; use it without a payload (shim diagnostics).
+[ "${SURYA_AUDIO:-0}" = 1 ] && CFLAGS="$CFLAGS -DSURYA_AUDIO_PROBE"
+OBJS="start shim console mmu fdt loader ufs compat surya_touch surya_audio"
 mkdir -p out/surya
-for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c compat.c surya_touch.c; do
+for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c compat.c surya_touch.c surya_audio.c; do
 	$CC $CFLAGS -c $f -o out/surya/${f%.*}.o
 done
 # Same rule as build.sh: no absolute relocations outside start.o.

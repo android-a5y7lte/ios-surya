@@ -11,6 +11,9 @@
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
+#ifdef SURYA_AUDIO_PROBE
+#include "surya_audio.h"
+#endif
 #ifdef SURYA_TOUCH_PROBE
 #include "surya_touch.h"
 #endif
@@ -386,7 +389,12 @@ void shim_main(uint64_t dtb)
 	con_str("LOADER", why);
 	con_skip();
 
-#ifdef SURYA_TOUCH_PROBE
+#ifdef SURYA_AUDIO_PROBE
+	/* surya: speaker amplifier probe (MMU still off). */
+	stage = "audio";
+	surya_audio_probe();
+	con_skip();
+#elif defined(SURYA_TOUCH_PROBE)
 	/* surya: read-only touch SPI bus probe (MMU still off). */
 	stage = "touch";
 	surya_touch_probe();

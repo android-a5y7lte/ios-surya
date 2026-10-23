@@ -561,6 +561,10 @@ difference. A5 now plays amp 0x4c alone, then 0x4d alone (A5b) to map amps to sp
 phone), or the earpiece output is too faint at this level and the sound carries through
 the body, or one amp did not follow the PWR_CTRL writes. Next time: louder/longer per-amp
 test plus status read between the two phases.
+A5b photo (`evidence/2026-10-24-audioA5b.jpg`): all writes err=0; after: 0x24-0x2b =
+`04 00 51 80 00 d0 41 d0` (0x4c) / `04 00 51 80 00 d0 41 a0` (0x4d): byte 0x29 went
+0x50 → 0xd0 on **both** amps vs A5 (bit 7 set on both), so both amps saw the same event;
+consistent with both having played. Register meanings still to look up (TAS2562 datasheet).
 
 ## Open questions (in order)
 

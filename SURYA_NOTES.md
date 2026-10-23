@@ -335,6 +335,19 @@ Steps:
   automatically when `research/fw/novatek_ts_huaxing_fw.bin` exists (SURYA_TOUCH=0 to
   disable). Syntax-checked locally with clang against stub headers; needs a CI build.
 
+## Wallpaper / PosterBoard (research 2026-10-23)
+
+`tools/sweet-crash.py` on the owner's PC (cache extracted from `ios16-root.img`,
+`grep -a` needed because the log has binary bytes):
+`CRASH PosterBoard sig 5` at **`-[PBFPosterExtensionDataStore
+_stateLock_setupSwitcherConfigurationForFirstTime] + 2040`** (a trap/assert), called
+from `_stateLock_updateExtensions:refreshDescriptors:…` ← `executeUpdate:…` ←
+`prewarmWithCompletion:` ← `PBFPosterExtensionDataStoreXPCServiceGlue
+server:prewarmWithCompletion:` ← `PRSServer prewarmWithCompletion:` (XPC from
+SpringBoard). So the very first poster ("switcher") configuration can't be built —
+most likely no poster extension/descriptor was found. Next: disassemble around +2040
+for the assert text.
+
 ## Backlight plan (research 2026-10-23)
 
 - Hardware: live DT `qcom,wled@d800` on **PM6150L SID 5**, `qcom,pm6150l-spmi-wled`, ctrl

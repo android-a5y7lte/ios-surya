@@ -18,6 +18,7 @@
 # returns EROFS for every write.
 # CPUS=N (env, default 6 since 2026-10-23: tested on surya) sets cpus=N; cores 0-5 are the Cortex-A55s (MPIDR
 # 0x000-0x500 on surya, same as sweet), so CPUS=6 matches upstream's setting.
+# CPUS=8 also starts the two Cortex-A76s (MPIDR 0x600/0x700; patch 0078).
 # CPUS other than 1 adds "-cpuN" to the output name (CPUS=1 is the safe fallback).
 # Needs: python3, clang, lld, llvm (llvm-objcopy/readelf/nm), and
 #        dtb/surya/surya-boot.dtb (this phone's boot.img DTB, gitignored).
@@ -31,12 +32,13 @@ cd "$(dirname "$0")/.."
 KERNEL=${1:?usage: tools/surya-test4.sh KERNEL [4b]}
 VARIANT=${2:-4}
 CPUS=${CPUS:-6}
+FBHZ=${FBHZ:-30}   # panel copy rate (sweetfb_hz); 60 = every vsync, smoother, more CPU
 case "$CPUS" in [1-8]) ;; *) echo "error: CPUS must be 1..8" >&2; exit 1 ;; esac
-NAME=test$VARIANT; [ "$CPUS" = 1 ] || NAME=$NAME-cpu$CPUS
+NAME=test$VARIANT; [ "$CPUS" = 1 ] || NAME=$NAME-cpu$CPUS; [ "$FBHZ" = 30 ] || NAME=$NAME-hz$FBHZ
 case "$VARIANT" in
 	4) EXTRA='' ;;
 	4b) EXTRA=' rd=ufsroot0' ;;
-	5) EXTRA=' rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 sweetfb_noconsole=1 sweetfb_hz=30' ;;
+	5) EXTRA=' rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 sweetfb_noconsole=1 sweetfb_hz='"$FBHZ" ;;
 	*) echo "error: variant must be 4, 4b or 5" >&2; exit 1 ;;
 esac
 # Tests 4/4b: buttons off and no log ring (nothing may write). Test 5: the

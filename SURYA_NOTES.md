@@ -15,6 +15,21 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 15:43** — **Test 4 PASSED: XNU boots on surya.** Image
+  `shim/out/shim-boot-surya-test4.img` (SHA256 `a9f09650…f682`) built on the owner's
+  PC with `tools/surya-test4.sh` from CI kernel `xnu #1` (unchanged upstream patches),
+  `fastboot boot`, nothing flashed, UFS writes disabled. Photo:
+  `evidence/2026-10-23-test4-xnu-kernel-boot.jpg`. Observed:
+  - `SWEET CPU: requested=1 selected=1 (limit=8)`, `cpu=0 mpidr=0x0 came alive; SGI1 OK`,
+    `1/1 CPUs initialized, SGI1 verified` → GICv3, timer, scheduler OK.
+  - `SWEET FB: AppleCLCD 1080x2400 stride 4320 at 0x9c000000 ... presented as 1125x2436`.
+  - `SWEET WDT`, `SWEET SURF: IOCoreSurfaceRoot registered`, `SWEET HID: buttons registered`,
+    `SWEET HID: touch registered` (service only; `sweettouch=0`), `SWEET BATTERY: static fallback`.
+  - BSD init: MAC framework, SWEET AMFI + permissive Sandbox, `SWEET HFS: hfs-627.100.6
+    registered`, mbinit, Skywalk self-tests PASSED, lo0/gif0/stf0 attached.
+  - Final: `Waiting on <dict>...IOProviderClass IOMedia ... Content Apple_HFS</dict>` —
+    the expected stop: no root device given (no `rd=ufsroot0`), no HFS root exists yet.
+
 - **2026-10-23 15:12** — **Test 3 PASSED.** `fastboot boot shim/out/shim-boot-surya.img`
   (SHA256 `7c9048e2…28c9`, nothing flashed). Photo:
   `evidence/2026-10-23-test3-shim-ufs-probe.jpg`. Observed on screen:

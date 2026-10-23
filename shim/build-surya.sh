@@ -23,8 +23,9 @@ CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -fno-jump-tables -fno-builtin-strc
  -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DSURYA_TOUCH_PROBE -DSURYA_TOUCH_STEP=${SURYA_TOUCH_STEP:-1}"
 # Audio bring-up: SURYA_AUDIO=1 runs the speaker amp probe (surya_audio.c)
 # instead of the touch probe; use it without a payload (shim diagnostics).
-# SURYA_AUDIO=2 also releases both amp resets (step A2); 3 adds the LPASS probe (A3).
-case "${SURYA_AUDIO:-0}" in 1|2|3) CFLAGS="$CFLAGS -DSURYA_AUDIO_PROBE -DSURYA_AUDIO_STEP=$SURYA_AUDIO" ;; esac
+# SURYA_AUDIO=2 also releases both amp resets (step A2); 3 adds the LPASS probe (A3, freezes);
+# 4 = A2 + GPIO timing and amp register dump (A4, no LPASS).
+case "${SURYA_AUDIO:-0}" in 1|2|3|4) CFLAGS="$CFLAGS -DSURYA_AUDIO_PROBE -DSURYA_AUDIO_STEP=$SURYA_AUDIO" ;; esac
 OBJS="start shim console mmu fdt loader ufs compat surya_touch surya_audio"
 mkdir -p out/surya
 for f in start.S shim.c console.c mmu.c fdt.c loader.c ufs.c compat.c surya_touch.c surya_audio.c; do

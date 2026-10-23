@@ -527,6 +527,13 @@ sc7180 (ADSP-less in mainline): lpasscorecc 0x62d00000, lpass_cpu hdmiif 0x62d87
 lpaif 0x62f00000, lpass_hm 0x63000000, needs GCC_LPASS_CFG_NOC_SWAY_CLK (0x47018,
 not in gcc-sm7150.c). Step A3 (`SURYA_AUDIO=3`) reads those (may freeze). Plan B if
 LPASS is locked: bit-bang I2S on gpio53-56 at a low sample rate (CPU-driven beep test).
+**A3 result (2026-10-24 00:01, `evidence/2026-10-24-audioA3-*.jpg`):** GCC 0x47000 =
+0x80000000, 0x47018 = 0 (no sc7180-style sway branch there) → **froze on the first LPASS
+read (0x63000000, lpass_hm)**. Treat LPASS as unreachable without the ADSP for now.
+Plan B facts: tertiary MI2S rx-lines 0x01 → **SD0 gpio55 = playback data to the amps**,
+tx-lines 0x02 → SD1 gpio56 = IV sense from the amps; SCK gpio53, WS gpio54 (msm master).
+TAS2562 TDM_CFG0 (0x06) reset 0x09 = 48 kHz, frame start; SAMP_RATE 000 = 8 kHz exists.
+Step A4: TLMM write timing + amp regs 0x00-0x0f.
 
 ## Open questions (in order)
 

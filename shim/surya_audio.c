@@ -25,6 +25,10 @@
  * Step A3 (SURYA_AUDIO=3): also enables the GCC LPASS config-NoC branch if present
  * and reads 2 words at 4 LPASS bases (sc7180 layout). May freeze the phone (force
  * reboot: hold Power + Volume down); that itself answers the question.
+ * A3 result: froze on the first LPASS read (0x63000000).
+ *
+ * Step A4 (SURYA_AUDIO=4): no LPASS; times TLMM pad writes (gpio53 latch only,
+ * OE off) for a CPU-generated I2S, and dumps amp registers 0x00-0x0f.
  */
 #include <stdint.h>
 #include "console.h"
@@ -409,7 +413,39 @@ void surya_audio_probe(void)
 	amp_probe(0x4c, "AMP 4C (right)");
 	amp_probe(0x4d, "AMP 4D (left)");
 #endif
-#if SURYA_AUDIO_STEP >= 3
+#if SURYA_AUDIO_STEP == 4
+	/*
+	 * Step A4 (no LPASS): plan B feasibility. Time TLMM pad writes (gpio53
+	 * output latch only; its OE stays off, so the pin is not driven) and dump
+	 * the amps' page-0 registers 0x00-0x0f (read only).
+	 */
+	con_str("AUDIO", "step A4: GPIO speed + amp regs");
+	uintptr_t io53 = CFG(TLMM_WEST, 53) + 4;
+	uint32_t keep = rd(io53);
+	uint64_t t0 = ticks();
+	for (unsigned i = 0; i < 100000; i++)
+		*(volatile uint32_t *)io53 = (i & 1) << 1;	/* plain posted store */
+	__asm__ volatile("dsb sy" ::: "memory");
+	uint64_t t1 = ticks();
+	for (unsigned i = 0; i < 100000; i++)
+		(void)*(volatile uint32_t *)io53;
+	uint64_t t2 = ticks();
+	wr(io53, keep);
+	/* ticks are 19.2 MHz: ns per access = ticks * 1e9 / 19.2e6 / 1e5 */
+	con_hex2("TLMM ns/op", "write=", (uint32_t)((t1 - t0) * 10000 / 19200),
+	    "read=", (uint32_t)((t2 - t1) * 10000 / 19200));
+	static const uint8_t amps[] = { 0x4c, 0x4d };
+	for (unsigned a = 0; a < 2; a++) {
+		uint8_t r[16];
+		int e = i2c_read(amps[a], 0x00, r, 16);
+		uint32_t w[4] = {0};
+		for (unsigned i = 0; i < 16; i++)
+			w[i / 4] |= (uint32_t)r[i] << (24 - 8 * (i % 4));
+		con_hex2(a ? "AMP 4D 00-07" : "AMP 4C 00-07", "", w[0], "", w[1]);
+		con_hex2(a ? "AMP 4D 08-0f" : "AMP 4C 08-0f", "", w[2], e ? "ERR " : "", w[3]);
+	}
+#endif
+#if SURYA_AUDIO_STEP == 3
 	/*
 	 * Step A3: can the apps CPU reach LPASS with the ADSP off? Addresses are
 	 * sc7180's (closest mainline LPASS without ADSP); unverified on sm7150.

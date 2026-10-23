@@ -1,0 +1,52 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4203,6 +4203,23 @@
+ 
+ bad:
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * surya: log every failed posix_spawn (who, errno, path). Extensions and
++	 * widgets never start and ~100 xpcproxy runs exec nothing; this shows
++	 * which launches fail and why. At most 300 lines per boot.
++	 */
++	if (error != 0) {
++		static int sweet_spawn_fail_lines;
++		if (sweet_spawn_fail_lines < 300) {
++			sweet_spawn_fail_lines++;
++			const char *sp = (imgp != NULL && imgp->ip_strings != NULL) ?
++			    imgp->ip_strings + strlen(EXECUTABLE_KEY) : "?";
++			printf("SPAWN FAIL %s[%d] err %d %.160s\n", ap->p_comm,
++			    proc_getpid(ap), error, sp);
++		}
++	}
++#endif
+ 	if (error == 0) {
+ 		/* reset delay idle sleep status if set */
+ #if CONFIG_DELAY_IDLE_SLEEP
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1484,6 +1484,23 @@
+ 		    __FUNCTION__, p->p_comm, proc_getpid(p), rv);
+ 	}
+ #endif
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * surya: log non-zero exits (status, exit reason). xpcproxy exits without
++	 * exec'ing a job when a launch fails. At most 300 lines per boot.
++	 */
++	if (rv != 0 && strcmp(p->p_comm, "bluetoothd") != 0 &&
++	    strncmp(p->p_comm, "fairplayd", 9) != 0) {   /* both respawn ~50x */
++		static int sweet_exit_lines;
++		if (sweet_exit_lines < 300) {
++			sweet_exit_lines++;
++			printf("EXIT %s[%d] status 0x%x reason ns %u code 0x%llx\n", p->p_comm,
++			    proc_getpid(p), rv,
++			    exit_reason != OS_REASON_NULL ? exit_reason->osr_namespace : 0,
++			    exit_reason != OS_REASON_NULL ? (unsigned long long)exit_reason->osr_code : 0ULL);
++		}
++	}
++#endif
+ 
+ 	/*
+ 	 * If a thread in this task has already

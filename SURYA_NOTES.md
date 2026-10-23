@@ -445,6 +445,7 @@ by another xpcproxy (no target exec) → ~100 launches fail inside xpcproxy befo
 posix_spawn print in kern_exec.c (0042). Next: kernel patch logging every failed
 exec/posix_spawn (process, path, errno) and xpcproxy exit status/reason; needs the exact
 xnu-8796.141.3 kern_exec.c/kern_exit.c (from the CI `xnu-buildtree` artifact).
+Patch **0085** `surya-spawn-exit-log` (sources from the owner's buildtree (3)): `SPAWN FAIL name[pid] err N path` at posix_spawn's `bad:` label, and `EXIT name[pid] status reason ns/code` for non-zero exits (bluetoothd/fairplayd skipped), 300 lines each.
 
 ## Backlight plan (research 2026-10-23)
 

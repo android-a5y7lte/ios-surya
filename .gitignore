@@ -8,3 +8,5 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+# kernel logs pulled from the phone (tools/sweet-log-pull.sh)
+logs/

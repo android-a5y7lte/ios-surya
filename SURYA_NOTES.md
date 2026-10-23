@@ -28,6 +28,10 @@ reference. **This file is the handoff for the surya port.**
   off; the 0079 fade-to-black does not switch the LCD backlight (PM6150L WLED), so
   "off" stays lit — cosmetic TODO. Press 2: lock screen back at 4:21 with charging icon
   and a new blue status icon (`-power-press-wake.jpg`).
+- **Volume up/down work** (owner: iOS volume HUD appears on each press) → PM6150L GPIO2
+  vol-up and PON resin vol-down match sweet. Home indicator bar does the normal
+  "swipe up" hint animation. Blue status icon under the battery still unidentified
+  (check the log). Photo: `evidence/2026-10-23-test5-lockscreen-4-23.jpg`.
 
 - **2026-10-23 16:20** — **Test 5: iOS userland boots on surya — Apple logo.**
   `fastboot -S 512M flash userdata ios16-root.simg` (24/24 OKAY, 377 s; owner approved

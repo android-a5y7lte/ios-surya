@@ -452,6 +452,13 @@ driverkitd (sig 9). **No xpcproxy failure at all** → the "101 xpcproxy without
 was a logging artifact: 0042's `exec NAME` is printed on only one posix_spawn branch, so
 the exec log is incomplete and "no extension ever exec'd" is NOT proven. Patch **0086**:
 `APPEX spawn|execve err N path` for every exec whose path contains ".appex".
+**Test 15 (0086, owner also opened Today View):** **0 APPEX lines** → confirmed: no app
+extension is ever exec'd, not even attempted (no failed spawn either). So the problem is
+before launch: extension discovery (LaunchServices/PlugInKit registration of system
+.appex bundles: lsd/pkd databases built on first boot) or a launch request refused in
+runningboardd/launchd. Next: check what lsd/pkd know (their databases on the HFS root,
+e.g. /private/var/containers/Data/System/*/Library/... and /private/var/mobile/Library/...),
+or trace pkd/lsd file opens of the .appex Info.plists.
 
 ## Backlight plan (research 2026-10-23)
 

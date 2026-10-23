@@ -556,6 +556,11 @@ The CPU-generated I2S at 8 kHz is accepted by at least one TAS2562. Photo
 `evidence/2026-10-24-audioA5.jpg`: both SETUP err=0, after: PWR 0x0e / 0x8e, regs 0x24-0x2b
 `04 00 51 80 00 50 41 c0` (0x4c) and `04 00 51 80 00 50 41 70` (0x4d): no obvious fault
 difference. A5 now plays amp 0x4c alone, then 0x4d alone (A5b) to map amps to speakers.
+**A5b result (00:10):** owner heard **both** beeps (0x4c alone, then 0x4d alone) from the
+**bottom**. Unexplained: either both amps feed the bottom speaker (unlikely for a stereo
+phone), or the earpiece output is too faint at this level and the sound carries through
+the body, or one amp did not follow the PWR_CTRL writes. Next time: louder/longer per-amp
+test plus status read between the two phases.
 
 ## Open questions (in order)
 

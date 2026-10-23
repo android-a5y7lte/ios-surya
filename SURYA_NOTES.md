@@ -15,6 +15,14 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-23 ~18:22 — cpus=8 + sweetfb_hz=60 boots fine** (`CPUS=8 FBHZ=60
+  tools/surya-test4.sh KERNEL 5`, A76s at MPIDR 0x600/0x700 via upstream patch 0078);
+  owner: scrolling "a bit better". Still CPU-rendered. Open UI issues reported by the
+  owner: brightness slider has no effect (no `/backlight` service; PM6150L WLED driver
+  needed), no auto-brightness (no ALS), Today View / App Library show a plain white
+  background (no wallpaper: PosterBoard crashes with sig 5 at start — under
+  investigation), page swipes not fluid. Dark/light mode switch works.
+
 - **2026-10-23 ~18:08 — 🎉🎉 MILESTONE: iOS HOME SCREEN ON SURYA, UNLOCKED BY TOUCH.**
   CI `xnu #2` (commit `fb711be`, patch 0082) kernel, `tools/surya-test4.sh KERNEL 5`
   (cpus=6, `sweettouch=2`, firmware as `TouchFW` blob), `fastboot boot`. The owner swiped

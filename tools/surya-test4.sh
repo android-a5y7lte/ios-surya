@@ -42,8 +42,16 @@ esac
 # Tests 4/4b: buttons off and no log ring (nothing may write). Test 5: the
 # button driver only reads PMIC registers and surya's keys sit on the same
 # PM6150/PM6150L pins as sweet's, so it stays on; the log ring is allowed.
+TOUCH='sweettouch=0'; BLOB=()
+FW=research/fw/novatek_ts_huaxing_fw.bin
 if [ "$VARIANT" = 5 ]; then
 	KEYSLOG=''
+	# Touch (patch 0082, needs a kernel built with it): firmware as a payload blob.
+	if [ -f "$FW" ] && [ "${SURYA_TOUCH:-1}" = 1 ]; then
+		TOUCH='sweettouch=2'; BLOB=(--blob "TouchFW=$FW")
+	else
+		echo "note: $FW missing (or SURYA_TOUCH=0): touch disabled" >&2
+	fi
 	[ -f research/ipsw-x/d22ap.adt ] || echo "warning: research/ipsw-x/d22ap.adt missing: iOS will see an iPod with a Home button" >&2
 else
 	KEYSLOG='sweetkeys=0 sweetlog=0'
@@ -52,7 +60,8 @@ fi
 mkdir -p shim/out
 python3 tools/mkadt.py shim/out/surya.adt --highmem
 python3 tools/mkpayload.py "$KERNEL" shim/out/surya.adt shim/out/payload-surya-$NAME.bin \
-	--cmdline "debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweettouch=0 $KEYSLOG$EXTRA"
+	"${BLOB[@]}" \
+	--cmdline "debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin $TOUCH $KEYSLOG$EXTRA"
 shim/build-surya.sh shim/out/payload-surya-$NAME.bin
 mv shim/out/shim-boot-surya.img shim/out/shim-boot-surya-$NAME.img
 sha256sum shim/out/shim-boot-surya-$NAME.img

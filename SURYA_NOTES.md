@@ -305,7 +305,18 @@ Steps:
   byte at [0], so Linux `buf[1]` = our `[0]`; fixed in the reset-state check and the
   point parser (`pt + 6*i`, 65 bytes). Touch loop now runs if FWINFO is valid.
 - 3d port into XNU as `sweet_touch` Novatek path; firmware shipped in the root image
-  or the payload.
+  or the payload. **Implemented 2026-10-23:** `xnu/patches/0082-surya-novatek-spi-touch.patch`
+  (adds the Novatek SPI path to `bsd/dev/sweet_touch.c`; boot-arg `sweettouch=2`
+  selects it, sweet's Goodix/Focaltech path untouched; thread starts after
+  `sweettouchdelay` s, default 30; maps GCC/TLMM-west/SE0, clocks + pins + SPI setup
+  as in the shim, checks chip id `0C xx xx 72 66 03`, eng reset + bootloader reset +
+  firmware download (3 attempts), then polls the event buffer every 10 ms and feeds
+  `touch_report()` → `sweet_hid_touch()`; ESD pattern → firmware reload). Firmware
+  delivery: `tools/mkpayload.py --blob TouchFW=FILE` appends a segment and adds
+  `/chosen/memory-map TouchFW = <phys, size>`; the kernel reads it via
+  `ml_static_ptovirt`. `tools/surya-test4.sh KERNEL 5` adds the blob and `sweettouch=2`
+  automatically when `research/fw/novatek_ts_huaxing_fw.bin` exists (SURYA_TOUCH=0 to
+  disable). Syntax-checked locally with clang against stub headers; needs a CI build.
 
 ## Open questions (in order)
 

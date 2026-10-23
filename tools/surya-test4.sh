@@ -32,10 +32,10 @@ cd "$(dirname "$0")/.."
 KERNEL=${1:?usage: tools/surya-test4.sh KERNEL [4b]}
 VARIANT=${2:-4}
 CPUS=${CPUS:-6}
-FBHZ=${FBHZ:-30}   # panel copy rate (sweetfb_hz); 60 = every vsync, smoother, more CPU
+FBHZ=${FBHZ:-60}   # panel copy rate (sweetfb_hz); default 60 since 2026-10-23 (every vsync); 30 = less CPU
 ARGS=${ARGS:-}     # extra boot-args appended as is (e.g. ARGS="sweetbattery=1")
 case "$CPUS" in [1-8]) ;; *) echo "error: CPUS must be 1..8" >&2; exit 1 ;; esac
-NAME=test$VARIANT; [ "$CPUS" = 1 ] || NAME=$NAME-cpu$CPUS; [ "$FBHZ" = 30 ] || NAME=$NAME-hz$FBHZ
+NAME=test$VARIANT; [ "$CPUS" = 1 ] || NAME=$NAME-cpu$CPUS; [ "$FBHZ" = 60 ] || NAME=$NAME-hz$FBHZ
 case "$VARIANT" in
 	4) EXTRA='' ;;
 	4b) EXTRA=' rd=ufsroot0' ;;

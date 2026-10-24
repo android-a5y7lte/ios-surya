@@ -755,3 +755,11 @@ the dyld shared cache), then register as "AMFI" with a minimal mpo_policy_syscal
   call logged as `SWEET AMFI: name syscall 0xNN`. Test: boot with `sweetlsreset=1` (forces lsd rebuild),
   then grep the live log for `SWEET AMFI:` and check wallpaper/widgets; re-pull the iOS log and grep
   "Unable to find AMFI" / "Extension cache does not have an entry".
+
+### Audio, kernel 11 (patch 0092) result (live-11)
+- Verified: mediaserverd now reads SweetAudio2Device `device UID` (found, 2x), `is private` (found), then
+  `supports prewarming` (none) and `data exchange blocks` (none), and stops there: it never opens a user
+  client on the device; no crash. It also reads /product/audio `supports-always-listening` (found),
+  /product `builtin-mics` (found), /product/haptics (none).
+- Next: learn the expected format of `data exchange blocks` (IOAudio2 shared-memory description) from
+  the dyld cache (`ipsw dyld str` / `xref` / `disass`).

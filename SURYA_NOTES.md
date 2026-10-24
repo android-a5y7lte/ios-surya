@@ -833,3 +833,8 @@ Steps (each one a fastboot-boot test, nothing flashed): G0 prerequisites (firmwa
 toolchain); G1 read-only (GPU clocks in GCC, fuses/speed bin, GPUCC state); G2 CX GDSC + clocks; G3 SMMU context;
 G4 GMU firmware + start + HFI; G5 TrustZone zap shader; G6 GX power via GMU, CP ring + sqe microcode, first
 command; G7 IOKit client (RedwoodGPU-style) + Mesa freedreno (a618) in backboardd; G8 CoreAnimation GLES renderer.
+- G1 = patch 0095 (`0095-surya-gpu-g1-readonly-probe.patch`): IOKit `SweetGPU` (IOResources), boot-arg
+  `sweetgpu=1`, reads only: GCC GPU CBCRs 0x71004/0x7100c/0x71018 + vote 0x52004 (bits 15/16), QFPROM 0x780000+0x41a0
+  speed bin (bits 21..28), and GPUCC 0x5090000 (sc7180 offsets: cxo_aon 0x1004, gx_gdscr 0x100c, cx_gdscr 0x106c,
+  crc_ahb 0x107c, cx_snoc_dvm 0x108c, cx_gmu 0x1098, cxo 0x109c, gmu rcgr 0x1120/0x1124) only if the GPU AHB clock
+  is on. Log lines `SWEET GPU: …`.

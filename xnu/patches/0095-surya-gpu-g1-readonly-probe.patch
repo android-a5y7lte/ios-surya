@@ -1,0 +1,131 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+new file mode 100644
+index 0000000..10d564d
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -0,0 +1,97 @@
++/*
++ * surya GPU bring-up, step G1 (patch 0095): read-only look at the Adreno 618.
++ * Plan in SURYA_NOTES.md "GPU plan" (after HackiOS redwood_adreno.c steps 1-3).
++ *
++ * Boot-arg sweetgpu=1. Only reads, logged as "SWEET GPU: ...":
++ *   GCC (0x00100000): GPU branch clocks (CBCR bit 31 = clock off) and the
++ *     GPLL0 votes for the GPU (0x52004 bits 15/16), gcc-sm7150.c;
++ *   QFPROM speed bin (0x00780000 + 0x41a0, bits 21..28), qcom,gpu-speed-bin;
++ *   GPUCC (0x05090000, offsets as gpucc-sc7180.c, also Adreno 618): CX/GX
++ *     GDSC, GMU / CXO clocks, GMU clock source - only if the GPU's AHB clock
++ *     (GCC 0x71004) runs, since reading an unclocked block can stall the bus.
++ * Nothing is written; the GPU stays as the boot loader left it.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <pexpert/pexpert.h>
++
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++class SweetGPU : public IOService {
++	OSDeclareDefaultStructors(SweetGPU);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetGPU, IOService);
++
++#define GCC_PA          0x00100000u
++#define GCC_SIZE        0x001f0000u
++#define QFPROM_PA       0x00780000u
++#define QFPROM_SIZE     0x00007000u
++#define GPUCC_PA        0x05090000u
++#define GPUCC_SIZE      0x00009000u
++
++static inline uint32_t
++rd(vm_offset_t base, uint32_t off)
++{
++	return *(volatile uint32_t *)(base + off);
++}
++
++static const struct {
++	const char *name;
++	uint32_t    off;
++} gcc_regs[] = {
++	{ "gcc_gpu_cfg_ahb_cbcr", 0x71004 },
++	{ "gcc_gpu_memnoc_gfx_cbcr", 0x7100c },
++	{ "gcc_gpu_snoc_dvm_gfx_cbcr", 0x71018 },
++	{ "gcc_apcs_clock_vote(0x52004)", 0x52004 },
++}, gpucc_regs[] = {
++	{ "gpu_cc_cxo_aon_cbcr", 0x1004 },
++	{ "gx_gdscr", 0x100c },
++	{ "cx_gdscr", 0x106c },
++	{ "gpu_cc_crc_ahb_cbcr", 0x107c },
++	{ "gpu_cc_cx_snoc_dvm_cbcr", 0x108c },
++	{ "gpu_cc_cx_gmu_cbcr", 0x1098 },
++	{ "gpu_cc_cxo_cbcr", 0x109c },
++	{ "gpu_cc_gmu_cmd_rcgr", 0x1120 },
++	{ "gpu_cc_gmu_cfg_rcgr", 0x1124 },
++};
++
++bool
++SweetGPU::start(IOService *provider)
++{
++	int enabled = 0;
++	(void)PE_parse_boot_argn("sweetgpu", &enabled, sizeof(enabled));
++	if (enabled < 1 || !IOService::start(provider)) {
++		return false;
++	}
++	IOLog("SWEET GPU: G1 read-only probe (Adreno 618, chipid 0x06010800)\n");
++
++	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
++	for (unsigned i = 0; i < sizeof(gcc_regs) / sizeof(gcc_regs[0]); i++) {
++		uint32_t v = rd(gcc, gcc_regs[i].off);
++		IOLog("SWEET GPU: %s = 0x%08x%s\n", gcc_regs[i].name, v,
++		    gcc_regs[i].off == 0x52004 ? "" : ((v & 0x80000000u) ? " (off)" : " (on)"));
++	}
++	uint32_t vote = rd(gcc, 0x52004);
++	IOLog("SWEET GPU: gpll0 for gpu %s, gpll0_div for gpu %s\n",
++	    (vote & (1u << 15)) ? "voted" : "not voted", (vote & (1u << 16)) ? "voted" : "not voted");
++
++	vm_offset_t qf = ml_io_map(QFPROM_PA, QFPROM_SIZE);
++	uint32_t fuse = rd(qf, 0x41a0);
++	IOLog("SWEET GPU: qfprom 0x41a0 = 0x%08x, speed bin %u\n", fuse, (fuse & 0x1fe00000u) >> 21);
++
++	bool ahb_on = !(rd(gcc, 0x71004) & 0x80000000u);
++	if (!ahb_on) {
++		IOLog("SWEET GPU: GPU AHB clock off, GPUCC not read\n");
++	} else {
++		vm_offset_t cc = ml_io_map(GPUCC_PA, GPUCC_SIZE);
++		for (unsigned i = 0; i < sizeof(gpucc_regs) / sizeof(gpucc_regs[0]); i++) {
++			IOLog("SWEET GPU: %s = 0x%08x\n", gpucc_regs[i].name, rd(cc, gpucc_regs[i].off));
++		}
++	}
++	IOLog("SWEET GPU: G1 done\n");
++	return true;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index cc3caf4..d844e41 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -97,6 +97,11 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = AppleMobileFileIntegrity;"
+     "   },"
++    "   {"
++    "     'IOClass'         = SweetGPU;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetGPU;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 627f3c9..77f9c69 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -19,6 +19,7 @@ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitc
+ iokit/Kernel/arm/SweetBacklight.cpp                              optional iokitcpp
+ iokit/Kernel/arm/SweetAudio2.cpp                                 optional iokitcpp
+ iokit/Kernel/arm/SweetAMFI.cpp                                   optional iokitcpp
++iokit/Kernel/arm/SweetGPU.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp

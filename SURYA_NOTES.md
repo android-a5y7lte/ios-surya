@@ -502,6 +502,11 @@ Patch **0090** `surya-audio2-stub` (boot-arg `sweetaudio2=1`): empty `IOAudio2De
 class + `SweetAudio2Device` (IOResources) published as one, IOUserClientClass
 `SweetAudio2UserClient`; logs `SWEET AUDIO2: …` newUserClient types, every externalMethod
 selector + sizes, setProperties; accepts everything with zeroed outputs (discovery only).
+**Live-7 (0090, sweetaudio2=1):** mediaserverd never opened the stub (no newUserClient /
+selector lines; the stub's own start line is too early for the live log). Patch **0091**
+`surya-iokit-getprop-trace`: the sweetiolog trace also logs every property read
+(`IOK name: getprop Class(name) 'key' -> found|none`) and whole-property reads
+(`IOK name: getprops Class(name)`), to see what mediaserverd checks on IOAudio2Device.
 `tools/mkadt.py`: env `SWEET_ADT_PRODUCT_CHILDREN=audio[,haptics]` copies those /product
 children (whole subtree, iBoot placeholder props dropped, phandles re-assigned) from
 research/ipsw-x/d22ap.adt; prints the copied property names. Default unchanged.

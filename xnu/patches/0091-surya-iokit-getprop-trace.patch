@@ -1,0 +1,46 @@
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -3858,6 +3858,15 @@
+ 	void                 * editRef = NULL;
+ 
+ 	CHECK(IORegistryEntry, registry_entry, entry);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		char sname[32];
++		if (sweet_iolog(sname, sizeof(sname))) {
++			IOLog("IOK %s: getprops %s(%s)\n", sname,
++			    entry->getMetaClass()->getClassName(), entry->getName());
++		}
++	}
++#endif
+ 
+ #if CONFIG_MACF
+ 	GetPropertiesEditorRef ref;
+@@ -3955,6 +3964,9 @@
+ 	const OSSymbol *    sym;
+ 
+ 	CHECK( IORegistryEntry, registry_entry, entry );
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	IORegistryEntry * sweet_entry = entry;
++#endif
+ 
+ #if CONFIG_MACF
+ 	if (0 != mac_iokit_check_get_property(kauth_cred_get(), entry, property_name)) {
+@@ -4000,6 +4012,17 @@
+ 	}
+ 
+ 	sym->release();
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		/* surya: which properties a traced daemon reads, from which entry */
++		char sname[32];
++		if (sweet_iolog(sname, sizeof(sname))) {
++			IOLog("IOK %s: getprop %s(%s) '%.80s' -> %s\n", sname,
++			    sweet_entry->getMetaClass()->getClassName(), sweet_entry->getName(),
++			    property_name, obj ? "found" : "none");
++		}
++	}
++#endif
+ 	if (!obj) {
+ 		return err;
+ 	}

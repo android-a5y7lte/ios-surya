@@ -507,6 +507,13 @@ selector lines; the stub's own start line is too early for the live log). Patch 
 `surya-iokit-getprop-trace`: the sweetiolog trace also logs every property read
 (`IOK name: getprop Class(name) 'key' -> found|none`) and whole-property reads
 (`IOK name: getprops Class(name)`), to see what mediaserverd checks on IOAudio2Device.
+**Live-8 (0091):** stub published (`SWEET AUDIO2: IOAudio2Device stub published`);
+mediaserverd reads on it only **`'device UID'` (2x, none) and `'is private'` (none)**, then
+stops. Elsewhere: /product `builtin-mics`, `car-integration`, `product-id`, `ui-pip`;
+/product/audio `supports-always-listening`; /chosen `software-behavior`,
+`mac-address-bluetooth0`; arm-io `soc-generation`; D22AP `region-info` (all logged).
+Patch **0092**: stub gets `device UID`, `is private`=false, `device name`,
+`device manufacturer`, `model UID`, `transport type`='bltn', `clock domain`=0.
 `tools/mkadt.py`: env `SWEET_ADT_PRODUCT_CHILDREN=audio[,haptics]` copies those /product
 children (whole subtree, iBoot placeholder props dropped, phandles re-assigned) from
 research/ipsw-x/d22ap.adt; prints the copied property names. Default unchanged.

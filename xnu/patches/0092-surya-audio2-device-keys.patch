@@ -1,0 +1,31 @@
+--- a/iokit/Kernel/arm/SweetAudio2.cpp
++++ b/iokit/Kernel/arm/SweetAudio2.cpp
+@@ -10,7 +10,7 @@
+  * it ("SWEET AUDIO2: ...": newUserClient types, every externalMethod selector
+  * with its argument sizes, setProperties), accepts every call and returns
+  * zeroed outputs, so the protocol can be read from the log step by step.
+- * Only with boot-arg sweetaudio2=1.
++ * Only with boot-arg sweetaudio2=1. Patch 0092: first device-description keys.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <IOKit/IOService.h>
+@@ -66,6 +66,19 @@
+ 	setProperty(kIOUserClientClassKey, "SweetAudio2UserClient");
+ 	setProperty("DeviceName", "Speaker");
+ 	setProperty("DeviceManufacturer", "surya");
++	/*
++	 * Keys mediaserverd reads on an IOAudio2Device (live-8 getprop trace:
++	 * 'device UID' twice, then 'is private'), plus the usual companions of
++	 * an IOAudio2-style device description. Values are guesses for a
++	 * built-in speaker; the next trace shows what is read next.
++	 */
++	setProperty("device UID", "surya-builtin-speaker");
++	setProperty("is private", false);
++	setProperty("device name", "Speaker");
++	setProperty("device manufacturer", "surya");
++	setProperty("model UID", "surya-tas2562");
++	setProperty("transport type", 0x626c746eULL, 32);	/* 'bltn' built-in */
++	setProperty("clock domain", 0ULL, 32);
+ 	registerService();
+ 	IOLog("SWEET AUDIO2: IOAudio2Device stub published\n");
+ 	return true;

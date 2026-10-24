@@ -812,3 +812,24 @@ the dyld shared cache), then register as "AMFI" with a minimal mpo_policy_syscal
 - The live log for test14 was not captured (logs/test14.txt empty), so APPEX/crash counts for this boot are
   unknown; check over SSH.
 - TODO: make 0089 robust (numbered backups and also the SystemDataOnly store).
+
+## GPU plan (2026-10-24): follow HackiOS / ios-topaz / ios-sailfish
+How others did it (verified from their READMEs/source, cloned read-only):
+- **HackiOS** (POCO X5 Pro, SD778G, Adreno 642L = a6xx with GMU), open source since 2026-10-22:
+  kernel github.com/oosexgang/hackios-xnu-kernel (APSL 2.0): `bsd/dev/redwood_adreno.c` (4.1k lines: CX power,
+  clocks, fuses, SMMU contexts, GMU firmware + HFI, TrustZone zap shader, CP ring with a660_sqe.fw) and
+  `iokit/Kernel/RedwoodGPU.cpp` (1.3k lines, msm-style GPU client for Mesa); user space
+  github.com/oosexgang/hackios-xnu-userland (MIT): `eagl.c` (OpenGL ES bridge), injected into backboardd,
+  Mesa 25.0.7 freedreno with Darwin patches (`tools/mk-mesa.sh`, `tools/mesa/*.patch`). CoreAnimation uses its
+  OpenGL ES renderer; Metal only partial (shader work in progress). Firmware from the phone's /vendor/firmware.
+- **ios-topaz** (Redmi Note 12 4G, Adreno 610, no GMU) ported HackiOS's GPU work in ~2 days (patches 0900-0947,
+  userland/gpu, userland/mesa/freedreno-darwin.patch); GPU params e.g. GPU_ID 610, CHIP_ID 0x06010001.
+- **ios-sailfish** (Pixel 1, Adreno 530): own driver + Mesa freedreno as sweetgl.dylib in backboardd.
+surya: Adreno 618 (SM7150), a6xx **with GMU** -> closest template is HackiOS (a660 family), with a618 specifics
+from Linux drm/msm (a6xx_gmu.c legacy HFI for a618/a630, a6xx_catalog). Firmware: device-signed zap
+`a615_zap.mbn` is in github.com/sm7150-mainline/firmware-xiaomi-surya (local /home/claude/fw-surya);
+`a630_sqe.fw` + `a618_gmu.bin` are generic (linux-firmware). Addresses/clocks/OPPs: surya-dump/live.dts.
+Steps (each one a fastboot-boot test, nothing flashed): G0 prerequisites (firmware into the image, Mesa build
+toolchain); G1 read-only (GPU clocks in GCC, fuses/speed bin, GPUCC state); G2 CX GDSC + clocks; G3 SMMU context;
+G4 GMU firmware + start + HFI; G5 TrustZone zap shader; G6 GX power via GMU, CP ring + sqe microcode, first
+command; G7 IOKit client (RedwoodGPU-style) + Mesa freedreno (a618) in backboardd; G8 CoreAnimation GLES renderer.

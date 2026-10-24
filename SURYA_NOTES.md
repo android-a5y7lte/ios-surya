@@ -498,6 +498,10 @@ mediaserverd waits for **`IOAudio2Device`** and **`AppleAOPAudioController`** pu
 `ApplePPM` (none), `IOAccessoryManager` (0), opens AppleKeyStore and IOPMrootDomain.
 So an iOS audio device means: an IOAudio2Device-family service (+ maybe the AOP audio
 controller) and the /product/audio ADT node copied from d22ap.adt.
+Patch **0090** `surya-audio2-stub` (boot-arg `sweetaudio2=1`): empty `IOAudio2Device`
+class + `SweetAudio2Device` (IOResources) published as one, IOUserClientClass
+`SweetAudio2UserClient`; logs `SWEET AUDIO2: …` newUserClient types, every externalMethod
+selector + sizes, setProperties; accepts everything with zeroed outputs (discovery only).
 `tools/mkadt.py`: env `SWEET_ADT_PRODUCT_CHILDREN=audio[,haptics]` copies those /product
 children (whole subtree, iBoot placeholder props dropped, phandles re-assigned) from
 research/ipsw-x/d22ap.adt; prints the copied property names. Default unchanged.

@@ -1,0 +1,157 @@
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetAudio2.cpp
+@@ -0,0 +1,130 @@
++/*
++ * surya: discovery stub for iOS's audio server (patch 0090).
++ *
++ * mediaserverd (live log, sweetiolog=mediaserverd) waits for the publication
++ * of an IOService of class IOAudio2Device (and AppleAOPAudioController).
++ * Apple's IOAudio2 family is not part of this kernel, so - like
++ * IOMobileFramebuffer in SweetFramebuffer.cpp - an empty IOAudio2Device class
++ * is defined here and SweetAudio2Device (one per boot, IOResources match) is
++ * published as one. It does no audio yet: it logs what mediaserverd does with
++ * it ("SWEET AUDIO2: ...": newUserClient types, every externalMethod selector
++ * with its argument sizes, setProperties), accepts every call and returns
++ * zeroed outputs, so the protocol can be read from the log step by step.
++ * Only with boot-arg sweetaudio2=1.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSSerialize.h>
++#include <pexpert/pexpert.h>
++#include <sys/proc.h>
++
++class IOAudio2Device : public IOService {
++	OSDeclareDefaultStructors(IOAudio2Device);
++};
++OSDefineMetaClassAndStructors(IOAudio2Device, IOService);
++
++class SweetAudio2Device : public IOAudio2Device {
++	OSDeclareDefaultStructors(SweetAudio2Device);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
++	    OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetAudio2Device, IOAudio2Device);
++
++class SweetAudio2UserClient : public IOUserClient {
++	OSDeclareDefaultStructors(SweetAudio2UserClient);
++public:
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetAudio2UserClient, IOUserClient);
++
++static unsigned sweet_audio2_lines;
++
++static bool
++sweet_audio2_log_ok(void)
++{
++	return sweet_audio2_lines++ < 300;
++}
++
++bool
++SweetAudio2Device::start(IOService *provider)
++{
++	int enabled = 0;
++	(void)PE_parse_boot_argn("sweetaudio2", &enabled, sizeof(enabled));
++	if (enabled != 1 || !IOService::start(provider)) {
++		return false;
++	}
++	setName("SweetAudio2Device");
++	setProperty(kIOUserClientClassKey, "SweetAudio2UserClient");
++	setProperty("DeviceName", "Speaker");
++	setProperty("DeviceManufacturer", "surya");
++	registerService();
++	IOLog("SWEET AUDIO2: IOAudio2Device stub published\n");
++	return true;
++}
++
++IOReturn
++SweetAudio2Device::setProperties(OSObject *properties)
++{
++	if (sweet_audio2_log_ok()) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		OSSerialize *s = OSSerialize::withCapacity(512);
++		if (s && properties && properties->serialize(s)) {
++			IOLog("SWEET AUDIO2: %s setProperties %.300s\n", name, s->text());
++		}
++		OSSafeReleaseNULL(s);
++	}
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetAudio2Device::newUserClient(task_t owningTask, void *securityID, UInt32 type,
++    OSDictionary *properties, IOUserClient **handler)
++{
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOReturn ret = IOService::newUserClient(owningTask, securityID, type, properties, handler);
++	IOLog("SWEET AUDIO2: %s newUserClient type %u -> %#x\n", name, (unsigned)type, ret);
++	return ret;
++}
++
++IOReturn
++SweetAudio2UserClient::clientClose(void)
++{
++	if (sweet_audio2_log_ok()) {
++		IOLog("SWEET AUDIO2: client closed\n");
++	}
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetAudio2UserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    IOExternalMethodDispatch *dispatch __unused, OSObject *target __unused,
++    void *reference __unused)
++{
++	if (sweet_audio2_log_ok()) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET AUDIO2: %s sel %u in %u/%u out %u/%u\n", name, selector,
++		    args->scalarInputCount, args->structureInputSize,
++		    args->scalarOutputCount, args->structureOutputSize);
++	}
++	for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
++		args->scalarOutput[i] = 0;
++	}
++	if (args->structureOutputDescriptor == NULL && args->structureOutput != NULL) {
++		bzero(args->structureOutput, args->structureOutputSize);
++	}
++	return kIOReturnSuccess;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -17,6 +17,7 @@
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetBacklight.cpp                              optional iokitcpp
++iokit/Kernel/arm/SweetAudio2.cpp                                 optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -87,6 +87,11 @@
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBacklight;"
+     "   },"
++    "   {"
++    "     'IOClass'         = SweetAudio2Device;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetAudio2Device;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"

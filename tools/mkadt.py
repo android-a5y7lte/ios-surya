@@ -62,6 +62,26 @@ def d22ap_product(path=D22AP_ADT):
             return [(k, v) for k, f, v in c.props if not f and k not in ('name', 'AAPL,phandle')]
     raise SystemExit(f'{path}: no /product node')
 
+def d22ap_product_children(names, path=D22AP_ADT):
+    """Children of the real D22AP /product (e.g. 'audio'), copied with their
+    subtrees, without iBoot placeholder properties (flag bit set). Phandles
+    are dropped here and re-assigned by the caller. Env var
+    SWEET_ADT_PRODUCT_CHILDREN=audio[,haptics] selects them (default: none)."""
+    if not names or not os.path.exists(path):
+        return []
+    root, _ = adt.parse(open(path, 'rb').read())
+    prod = next((c for c in root.children
+                 if dict((k, v) for k, f, v in c.props).get('name') == b'product\0'), None)
+    out = []
+    for c in (prod.children if prod else []):
+        name = dict((k, v) for k, f, v in c.props).get('name', b'').rstrip(b'\0').decode()
+        if name in names:
+            out.append(c)
+            print(f'mkadt: /product/{name} copied from D22AP: '
+                  + ' '.join(k for k, f, v in c.props if not f), file=sys.stderr)
+    return out
+
+
 u32 = lambda *v: struct.pack('<%dI' % len(v), *v)
 u64 = lambda *v: struct.pack('<%dQ' % len(v), *v)
 cstr = lambda s: s.encode() + b'\0'
@@ -220,7 +240,17 @@ def build(seed=None, qemu=False, highmem=False):
     ])
 
     product_props = d22ap_product()
-    product = [node('product', [ph()] + product_props)] if product_props else []
+
+    def copy_subtree(c):
+        n = adt.Node()
+        n.props = [(k, 0, v) for k, f, v in c.props if not f and k != 'AAPL,phandle']
+        k, v = ph()
+        n.props.insert(1, (k, 0, v))
+        n.children = [copy_subtree(x) for x in c.children]
+        return n
+    wanted = [x for x in os.environ.get('SWEET_ADT_PRODUCT_CHILDREN', '').split(',') if x]
+    product_children = [copy_subtree(c) for c in d22ap_product_children(wanted)]
+    product = [node('product', [ph()] + product_props, product_children)] if product_props else []
 
     # Panic log region. /pram reg = <phys size>; it sits just above the
     # dram-size we expose, so XNU maps it but never allocates into it.

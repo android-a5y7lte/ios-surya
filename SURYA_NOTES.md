@@ -795,3 +795,20 @@ the dyld shared cache), then register as "AMFI" with a minimal mpo_policy_syscal
 - Patch 0094 (`0094-surya-amfi-iokit-service.patch`): IOService class `AppleMobileFileIntegrity` (IOResources
   match) + `SweetAMFIUserClient`: selector 6 with a 20..64-byte cdhash -> kIOReturnSuccess (root filesystem is
   the trust anchor, as in sweet_amfi.c); other selectors kIOReturnUnsupported; logs `SWEET AMFI kext: …`.
+
+### WALLPAPER AND WIDGETS WORK (test14, kernel 13 = 0093 + 0094)
+- Before test14 the LaunchServices DB still held test12's state (built while AMFI failed, 0 plug-ins):
+  test13's `sweetlsreset=1` did nothing (`rename … -> .sweetbak err 17`, the .sweetbak from test12 existed),
+  so lsd did not rescan; pkd `Candidate plugin count from LaunchServices: 0`, PosterBoard `Received 0 extensions`.
+- Fix done by hand over SSH (renames only, nothing deleted), in
+  /private/var/mobile/Containers/Data/InternalDaemon/56187CEC-3E3C-4071-ABD3-8D03572C43EC/Library/Caches/:
+  `….csstore.sweetbak` -> `….csstore.sweetbak-test12` and
+  `SystemDataOnly-com.apple.LaunchServices-4035-v2.csstore` -> `….sweetbak-test12` (patch 0089 does not touch
+  the SystemDataOnly store). Then booted kernel 13 with sweetlsreset=1 (+ audio args).
+- Result (photos evidence/test14-*): lock screen and home screen show the blue gradient default wallpaper with
+  the coral lock-screen clock; home screen Photos widget renders ("No content available"); Today view shows the
+  Batteries widget (96%, charging ring) and a Screen Time widget in placeholder state. App Library background
+  is plain white/grey (blur material missing, probably no GPU).
+- The live log for test14 was not captured (logs/test14.txt empty), so APPEX/crash counts for this boot are
+  unknown; check over SSH.
+- TODO: make 0089 robust (numbered backups and also the SystemDataOnly store).

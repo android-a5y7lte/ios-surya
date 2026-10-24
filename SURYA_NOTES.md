@@ -467,6 +467,17 @@ runningboardd/launchd. Next: check what lsd/pkd know (their databases on the HFS
 e.g. /private/var/containers/Data/System/*/Library/... and /private/var/mobile/Library/...),
 or trace pkd/lsd file opens of the .appex Info.plists.
 Patch **0087** `surya-vfs-extension-trace`: for lsd, pkd, PosterBoard, chronod, runningboardd, log open()/stat() of paths containing .appex / PlugIns / LaunchServices / ExtensionKit as `VFS name op err N path` (400 lines).
+**Live-2 result (0087, 2026-10-24 09:58):** only lsd shows up (12 lines): no
+LaunchServices.plist pref (ENOENT), no `.syncInterrupted`, **opens its database**
+`…/InternalDaemon/857C69BB-…/Library/Caches/com.apple.LaunchServices-4035-v2.csstore`,
+reads /System/Library/ExtensionKit/ExtensionPoints (5 .appexpt), no Caches/…LaunchServices.plist,
+then finds **`Caches/com.apple.LaunchServices.error` present (stat err 0)** — and nothing
+after that: lsd never opens any .appex / PlugIns path, **pkd, PosterBoard, chronod never
+touch an extension path at all**. Hypothesis: the first-boot LaunchServices database build
+failed/was interrupted (first boot ran 15 min at cpus=1), lsd left the `.error` marker and
+keeps using a database without plug-ins. Patch **0088** prints the marker's contents
+(`VFS LaunchServices.error size N read err E: text`). Likely fix afterwards: make lsd
+rebuild (move the csstore and .error aside — needs approval, it changes userdata).
 
 ## Backlight plan (research 2026-10-23)
 

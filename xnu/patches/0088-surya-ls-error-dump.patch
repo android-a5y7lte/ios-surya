@@ -1,0 +1,39 @@
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -5072,6 +5072,36 @@
+ 	}
+ 	sweet_vfs_lines++;
+ 	printf("VFS %s %s err %d %s\n", name, op, error, buf);
++	/*
++	 * lsd finds a "com.apple.LaunchServices.error" marker next to its
++	 * database and then stops (no plug-in scan): print its text once.
++	 */
++	static int sweet_vfs_error_dumped;
++	if (error == 0 && !sweet_vfs_error_dumped &&
++	    strnstr(buf, "LaunchServices.error", sizeof(buf)) != NULL) {
++		vnode_t vp = NULLVP;
++		vfs_context_t kctx = vfs_context_kernel();
++		sweet_vfs_error_dumped = 1;
++		if (vnode_lookup(buf, 0, &vp, kctx) == 0) {
++			char data[384];
++			int resid = 0;
++			off_t size = 0;
++			bzero(data, sizeof(data));
++			(void)vnode_size(vp, &size, kctx);
++			int re = vn_rdwr(UIO_READ, vp, (caddr_t)data, (int)sizeof(data) - 1, 0,
++			    UIO_SYSSPACE, IO_NOCACHE | IO_UNIT, vfs_context_ucred(kctx),
++			    &resid, vfs_context_proc(kctx));
++			int n = (int)sizeof(data) - 1 - resid;
++			for (int i = 0; i < n && i < (int)sizeof(data) - 1; i++) {
++				if (data[i] < 0x20 || data[i] > 0x7e) {
++					data[i] = '.';
++				}
++			}
++			printf("VFS LaunchServices.error size %lld read err %d: %s\n",
++			    (long long)size, re, data);
++			vnode_put(vp);
++		}
++	}
+ }
+ #endif
+ 

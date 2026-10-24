@@ -763,3 +763,19 @@ the dyld shared cache), then register as "AMFI" with a minimal mpo_policy_syscal
   /product `builtin-mics` (found), /product/haptics (none).
 - Next: learn the expected format of `data exchange blocks` (IOAudio2 shared-memory description) from
   the dyld cache (`ipsw dyld str` / `xref` / `disass`).
+- IOAudio2 property names CoreAudio reads (verified, CoreAudio __cstring around 0x1afb01a00-0x1afb02095,
+  sources AudioHAL/Source/AMCP/IOAudio2/IOAudio2_Driver.cpp and Old_HAL/.../HALS_IOA2UCDevice.cpp):
+  driver: `device UID`, `is private`;
+  device: `device name`, `device manufacturer`, `model UID`, `input latency`, `output latency`,
+  `io buffer frame size`, `input safety offset`, `output safety offset`, `is running`,
+  `input channel layout`, `output channel layout`, `wants input trap`, `wants output trap`,
+  `exclusive access owner`, `headset info`, `custom property info`, `supports client description`,
+  `legacy UID list`, `allows auto route`, `input streams`, `output streams`;
+  stream: `stream ID`, `format ID`, `min sample rate`, `max sample rate`, `available formats`, …,
+  `starting channel`, `terminal type`, `buffer mapping options`;
+  controls: `controls`, `control ID`, `base class`, `class`, `scope`, `element`, `read only`, `value`,
+  `property selectors`, `minimum value`, `maximum value`, `range map`, `transfer function`,
+  `start int value`, `start db value`, `integer steps`, `db per step`, `selectors`,
+  `left/center/right value`, `left/right channel`;
+  `data exchange blocks` -> entries with `block ID`, `descriptor`, `mapping options`; `supports prewarming`.
+  (Device class in CoreAudio: HALS_IOA2UCDevice = IOAudio2 user-client device.)

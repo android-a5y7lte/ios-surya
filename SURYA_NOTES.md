@@ -502,6 +502,12 @@ controller) and the /product/audio ADT node copied from d22ap.adt.
 children (whole subtree, iBoot placeholder props dropped, phandles re-assigned) from
 research/ipsw-x/d22ap.adt; prints the copied property names. Default unchanged.
 Test: `SWEET_ADT_PRODUCT_CHILDREN=audio CPUS=8 ARGS="... sweetiolog=mediaserverd,audiomxd" tools/surya-test4.sh KERNEL 5`.
+D22AP /product/audio holds only `wireless-splitter` and `supports-always-listening`.
+**Live-6 (with it):** mediaserverd now finds `IODeviceTree:/product/audio -> IOService`
+(looked up 6x), no crash, still waits for IOAudio2Device / AppleAOPAudioController.
+Same boot: home screen came up quickly (no rebuild), lsd 12 VFS lines and
+**`LaunchServices.error` exists again** (size 0) → lsd itself re-creates the marker
+after building; no other process touches an extension path.
 
 ## Backlight plan (research 2026-10-23)
 

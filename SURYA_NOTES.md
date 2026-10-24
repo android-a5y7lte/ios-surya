@@ -490,6 +490,19 @@ extensions for the first time** (`VFS lsd open … /Applications/DiagnosticsServ
 PlugIns/Diagnostic-NNNN.appex/Info.plist`, 400-line cap reached). The boot sits on the
 Apple logo while lsd rebuilds (system alive: sampler, battery, USB log keep going).
 
+## SSH plan (2026-10-24)
+
+`nc 192.168.7.2 62078` connects (lockdownd reachable over the kernel's USB Ethernet), but
+lockdownd never answers an unpaired TCP peer (QueryType times out) → no shortcut.
+Procursus (apt.procursus.us) no longer resolves; **Elucubratus** (apt.bingner.com, suite
+ios/1443.00, iphoneos-arm) works: openssh-server/client 8.4-2, libssl1.1.1, bash 5.0.3,
+coreutils(-bin) 8.31, grep, sed, ncurses, ncurses5-libs, readline, pcre2, profile.d,
+ca-certificates (14 debs, 5.5 MB, owner's `~/ios-ssh/debs`; 'firmware' is virtual).
+`tools/surya-add-ssh.py MOUNTED_ROOT DEBDIR PUBKEY` unpacks them into a mounted copy of
+the root image, adds host keys, a key-only sshd_config block, root's authorized_keys and
+a launchd job `com.openssh.sshd` (`sshd -D -e`, stderr → /dev/console). Flashing the result
+resets userdata to a fresh root (needs owner approval).
+
 ## iOS audio side (sweetiolog=mediaserverd,audiomxd, live-4)
 
 mediaserverd waits for **`IOAudio2Device`** and **`AppleAOPAudioController`** publications

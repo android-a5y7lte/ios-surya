@@ -13,7 +13,8 @@ PUBKEY        your SSH public key (e.g. ~/.ssh/id_ed25519.pub) -> root's
               authorized_keys (key login only, no passwords)
 
 What it changes in the image (run as root, idempotent):
-  - unpacks every .deb's data part into the root (dpkg-deb -x)
+  - unpacks every .deb's data part into the root (tar --keep-directory-symlink,
+    so /etc, /var, /tmp stay symlinks into /private)
   - /bin/sh -> bash if the image has no /bin/sh
   - host keys /etc/ssh/ssh_host_{ed25519,rsa}_key (generated here, once)
   - /etc/ssh/sshd_config: appends a surya block (key login for root,
@@ -56,8 +57,22 @@ def main():
     if not debs:
         sys.exit(f'{debdir}: no .deb files')
 
+    # iOS keeps /etc, /var, /tmp as symlinks into /private. `dpkg-deb -x`
+    # (plain tar) would replace those symlinks with real directories, so
+    # extract with --keep-directory-symlink, and refuse to go on if a
+    # symlink is already broken (e.g. by an earlier dpkg-deb -x run).
+    for link in ('etc', 'var', 'tmp'):
+        if not os.path.islink(os.path.join(root, link)):
+            sys.exit(f'{root}/{link} is not a symlink: start again from a fresh copy of the image')
     for deb in debs:
-        run('dpkg-deb', '-x', deb, root)
+        print('+ extract', os.path.basename(deb))
+        fs = subprocess.Popen(['dpkg-deb', '--fsys-tarfile', deb], stdout=subprocess.PIPE)
+        subprocess.run(['tar', '-x', '--keep-directory-symlink', '-C', root], stdin=fs.stdout, check=True)
+        if fs.wait() != 0:
+            sys.exit(f'dpkg-deb failed on {deb}')
+    for link in ('etc', 'var', 'tmp'):
+        if not os.path.islink(os.path.join(root, link)):
+            sys.exit(f'{root}/{link} was replaced by a directory: image copy is broken')
 
     sh = os.path.join(root, 'bin/sh')
     if not os.path.lexists(sh) and os.path.exists(os.path.join(root, 'bin/bash')):

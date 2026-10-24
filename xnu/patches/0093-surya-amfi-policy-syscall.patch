@@ -1,0 +1,63 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index cb67b4d..38375d8 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -305,8 +305,49 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+ 	}
+ }
+ 
++/*
++ * Policy syscalls: libraries reach AMFI with __sandbox_ms("AMFI", call, arg)
++ * (__mac_syscall), which needs a MAC policy named exactly "AMFI"; without it
++ * every call fails with ENOPOLICY ("Policy not found"). ExtensionFoundation
++ * then refuses the extension point cache ("Unable to find AMFI", Code=12),
++ * lsd rejects every app extension, and PosterBoard/chronod get no wallpaper
++ * or widget providers.
++ *   0x60  amfi_interface_query_bootarg_state(uint64_t *): arg points to a
++ *         uint64_t that receives the AMFI boot-arg state. SWEET sets none of
++ *         AMFI's boot-args (normal code signing), so the state is 0, the same
++ *         value the library starts from.
++ * Other calls are not implemented (ENOSYS); the first use of each call
++ * number is logged ("SWEET AMFI: name syscall N").
++ */
++#define SWEET_AMFI_SYSCALL_BOOTARG_STATE        0x60
++static uint64_t sweet_amfi_syscall_seen[4];
++
++static int
++sweet_amfi_syscall(struct proc *p, int call, user_addr_t arg)
++{
++	if (call >= 0 && call < 256 &&
++	    !(sweet_amfi_syscall_seen[call / 64] & (1ULL << (call % 64)))) {
++		sweet_amfi_syscall_seen[call / 64] |= 1ULL << (call % 64);
++		char name[32];
++		proc_name(proc_pid(p), name, sizeof(name));
++		printf("SWEET AMFI: %s syscall 0x%x\n", name, call);
++	}
++	switch (call) {
++	case SWEET_AMFI_SYSCALL_BOOTARG_STATE: {
++		uint64_t state = 0;
++		if (arg == USER_ADDR_NULL) {
++			return EINVAL;
++		}
++		return copyout(&state, arg, sizeof(state));
++	}
++	default:
++		return ENOSYS;
++	}
++}
++
+ static const struct mac_policy_ops sweet_amfi_mac_ops = {
+ 	.mpo_vnode_check_signature = sweet_amfi_vnode_check_signature,
++	.mpo_policy_syscall = sweet_amfi_syscall,
+ };
+ 
+ /*
+@@ -360,7 +401,7 @@ static struct mac_policy_conf sweet_sandbox_mac_conf = {
+ static mac_policy_handle_t sweet_sandbox_mac_handle;
+ 
+ static struct mac_policy_conf sweet_amfi_mac_conf = {
+-	.mpc_name = "SWEET AMFI",
++	.mpc_name = "AMFI",             /* the name __mac_syscall("AMFI", ...) looks up */
+ 	.mpc_fullname = "SWEET built-in Mobile File Integrity",
+ 	.mpc_ops = &sweet_amfi_mac_ops,
+ };

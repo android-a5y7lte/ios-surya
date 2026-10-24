@@ -747,3 +747,11 @@ Why: "Policy not found" = ENOPOLICY from __mac_syscall: userspace calls the MAC 
 but our built-in policy (patch 0035) registers as mpc_name "SWEET AMFI" and has no mpo_policy_syscall.
 Next: learn the AMFI policy-syscall ABI used by amfi_interface_query_bootarg_state (disassemble from
 the dyld shared cache), then register as "AMFI" with a minimal mpo_policy_syscall.
+- AMFI syscall ABI (verified, `ipsw dyld disass` on the phone's dyld cache, symbol in FrontBoardServices):
+  `amfi_interface_query_bootarg_state(uint64_t *out)`: `*out = 0; __sandbox_ms("AMFI", 0x60, &v)`;
+  on success `*out = v`, else returns errno. NULL out -> EINVAL.
+- Patch 0093 (`0093-surya-amfi-policy-syscall.patch`): built-in AMFI MAC policy renamed "SWEET AMFI" -> "AMFI",
+  adds mpo_policy_syscall: 0x60 copies out 0 (no AMFI boot-args); other calls ENOSYS; first use of each
+  call logged as `SWEET AMFI: name syscall 0xNN`. Test: boot with `sweetlsreset=1` (forces lsd rebuild),
+  then grep the live log for `SWEET AMFI:` and check wallpaper/widgets; re-pull the iOS log and grep
+  "Unable to find AMFI" / "Extension cache does not have an entry".

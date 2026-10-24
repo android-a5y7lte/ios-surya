@@ -1,0 +1,74 @@
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -5030,6 +5030,51 @@
+ 	           uap->class, uap->dpflags, AT_FDCWD, AUTH_OPEN_NOAUTHFD, UIO_USERSPACE, retval);
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * surya: trace extension discovery. For lsd, pkd, PosterBoard, chronod and
++ * runningboardd, log open()/stat() of paths that look extension-related
++ * (".appex", "PlugIns", "LaunchServices", "ExtensionKit") with the result,
++ * as "VFS name op err N path". At most 400 lines per boot.
++ */
++static int sweet_vfs_lines;
++
++static void
++sweet_vfs_log(const char *op, user_addr_t path, enum uio_seg seg, int error)
++{
++	char name[32], buf[256];
++	size_t len = 0;
++	int e;
++
++	if (sweet_vfs_lines >= 400) {
++		return;
++	}
++	proc_selfname(name, sizeof(name));
++	if (strcmp(name, "lsd") != 0 && strcmp(name, "pkd") != 0 &&
++	    strcmp(name, "PosterBoard") != 0 && strcmp(name, "chronod") != 0 &&
++	    strcmp(name, "runningboardd") != 0) {
++		return;
++	}
++	if (seg == UIO_SYSSPACE) {
++		e = copystr(CAST_DOWN(void *, path), buf, sizeof(buf), &len);
++	} else {
++		e = copyinstr(path, buf, sizeof(buf), &len);
++	}
++	if (e != 0 && e != ENAMETOOLONG) {
++		return;
++	}
++	buf[sizeof(buf) - 1] = '\0';
++	if (strnstr(buf, ".appex", sizeof(buf)) == NULL &&
++	    strnstr(buf, "PlugIns", sizeof(buf)) == NULL &&
++	    strnstr(buf, "LaunchServices", sizeof(buf)) == NULL &&
++	    strnstr(buf, "ExtensionKit", sizeof(buf)) == NULL) {
++		return;
++	}
++	sweet_vfs_lines++;
++	printf("VFS %s %s err %d %s\n", name, op, error, buf);
++}
++#endif
++
+ static int
+ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
+     int fd, enum uio_seg segflg, int *retval)
+@@ -5057,6 +5102,9 @@
+ 	    segflg, path, ctx);
+ 
+ 	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	sweet_vfs_log("open", path, segflg, error);
++#endif
+ 
+ 	kfree_type(typeof(*__open_data), __open_data);
+ 
+@@ -6932,6 +6980,9 @@
+ 		nd.ni_vp = fvp;
+ 	} else {
+ 		error = nameiat(&nd, fd);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		sweet_vfs_log("stat", path, segflg, error);
++#endif
+ 		if (error) {
+ 			return error;
+ 		}

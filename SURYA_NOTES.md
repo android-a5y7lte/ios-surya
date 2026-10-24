@@ -466,6 +466,7 @@ before launch: extension discovery (LaunchServices/PlugInKit registration of sys
 runningboardd/launchd. Next: check what lsd/pkd know (their databases on the HFS root,
 e.g. /private/var/containers/Data/System/*/Library/... and /private/var/mobile/Library/...),
 or trace pkd/lsd file opens of the .appex Info.plists.
+Patch **0087** `surya-vfs-extension-trace`: for lsd, pkd, PosterBoard, chronod, runningboardd, log open()/stat() of paths containing .appex / PlugIns / LaunchServices / ExtensionKit as `VFS name op err N path` (400 lines).
 
 ## Backlight plan (research 2026-10-23)
 

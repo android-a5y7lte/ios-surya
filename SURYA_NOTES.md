@@ -484,6 +484,20 @@ Patch **0089** `surya-ls-reset`: boot-arg `sweetlsreset=1` renames
 Caches dir to `*.sweetbak` (RENAME_EXCL, kernel context) when lsd first stats its
 `.syncInterrupted` marker, i.e. before it opens the database → lsd builds a new one.
 Reversible (rename back); use for one boot only.
+**Live-4 (0089, `sweetlsreset=1`, 2026-10-24 10:25):** `rename …-4035-v2.csstore ->
+.sweetbak err 0` (the .error marker was already gone: ENOENT). **lsd then scans
+extensions for the first time** (`VFS lsd open … /Applications/DiagnosticsService.app/
+PlugIns/Diagnostic-NNNN.appex/Info.plist`, 400-line cap reached). The boot sits on the
+Apple logo while lsd rebuilds (system alive: sampler, battery, USB log keep going).
+
+## iOS audio side (sweetiolog=mediaserverd,audiomxd, live-4)
+
+mediaserverd waits for **`IOAudio2Device`** and **`AppleAOPAudioController`** publications
+(IOServiceFirstPublish notifications), looks up `IODeviceTree:/product/audio` and
+`/product/haptics` (both missing from our ADT; D22AP has them), `vibrator`, `bluetooth`,
+`ApplePPM` (none), `IOAccessoryManager` (0), opens AppleKeyStore and IOPMrootDomain.
+So an iOS audio device means: an IOAudio2Device-family service (+ maybe the AOP audio
+controller) and the /product/audio ADT node copied from d22ap.adt.
 
 ## Backlight plan (research 2026-10-23)
 

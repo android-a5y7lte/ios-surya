@@ -715,3 +715,12 @@ Test 5 needs explicit owner approval (erases userdata = Ubuntu Touch).
 Test 2: read-only backup of `persist`, `modemst1/2`, `fsg`, `fsc`, `boot`,
 `dtbo`, `vbmeta` from Ubuntu Touch, and get the `boot.img` header + DTB for
 `shim/build.sh`.
+
+### PosterBoard crash report via SSH (test11)
+- Verified: `PosterBoard-…162034.0003.ips` = EXC_BREAKPOINT/SIGTRAP on thread 3 in
+  `-[PBFPosterExtensionDataStore _stateLock_setupSwitcherConfigurationForFirstTime]`
+  (called from `_stateLock_updateExtensions…` <- `prewarmWithCompletion:` via XPC). `asi` empty.
+  Same spot the old 4-byte patch skipped. launchd restarts PosterBoard, which then stays up.
+- Hypothesis: first-time setup traps because no poster extension is available
+  (consistent with 0 `.appex` launches). Next: check on-device which extensions/extension points exist.
+- Photos: evidence/test11-* (Today View widgets empty, home "Waiting…", App Library works).

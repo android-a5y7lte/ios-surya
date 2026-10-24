@@ -724,3 +724,26 @@ Test 2: read-only backup of `persist`, `modemst1/2`, `fsg`, `fsc`, `boot`,
 - Hypothesis: first-time setup traps because no poster extension is available
   (consistent with 0 `.appex` launches). Next: check on-device which extensions/extension points exist.
 - Photos: evidence/test11-* (Today View widgets empty, home "Waiting…", App Library works).
+
+### ROOT CAUSE of no wallpaper / "Waiting…" widgets: "Unable to find AMFI" (test11, iOS unified log)
+Method: copied /var/db/diagnostics + /var/db/uuidtext over SSH, decoded on the PC with Mandiant
+macos-UnifiedLogs (`unifiedlog_iterator -m log-archive`), filtered with tools/surya-ioslog-filter.py.
+Verified chain (lsd pid 101, ~6 min after boot):
+1. ExtensionFoundation (in lsd): `amfi_interface_query_bootarg_state returned error Policy not found`
+   then `Failed to read extension point cache at URL <private> … extensionKit.errorDomain Code=12
+   "Unable to find AMFI"`. MobileSystemServices `-[MIDaemonConfiguration codeSigningEnforcementIsDisabled]`
+   hits the same "Policy not found".
+2. So the extension point catalog is empty: `MICopyExtensionCacheEntryWithPlatform: Extension cache does
+   not have an entry for <every point>` (posterkit.provider, widgetkit-extension, diagnostics, intents,
+   notifications, fileprovider, quicklook, spotlight, …).
+3. lsd rejects every such appex: `Ignoring app extension at …/CollectionsPoster.appex due to validation issue(s)`.
+4. PosterBoard finds no poster provider -> `failure in _stateLock_setupSwitcherConfigurationForFirstTime
+   (PBFPosterExtensionDataStore.m:3431) : Invalid condition not satisfying: !_stateLock_switcherConfiguration`
+   -> SIGTRAP (crash report). chronod finds no widget extensions -> "Waiting…".
+The data itself is fine: /System/Library/xpc/extensions.plist (+ .sig) lists all 138 points incl.
+posterkit.provider and widgetkit-extension; extension point definitions also in PosterKit/WidgetKit
+Info.plist NSExtensionSDK; 129+ appex present.
+Why: "Policy not found" = ENOPOLICY from __mac_syscall: userspace calls the MAC policy named "AMFI",
+but our built-in policy (patch 0035) registers as mpc_name "SWEET AMFI" and has no mpo_policy_syscall.
+Next: learn the AMFI policy-syscall ABI used by amfi_interface_query_bootarg_state (disassemble from
+the dyld shared cache), then register as "AMFI" with a minimal mpo_policy_syscall.

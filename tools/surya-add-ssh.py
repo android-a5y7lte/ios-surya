@@ -17,6 +17,8 @@ What it changes in the image (run as root, idempotent):
     so /etc, /var, /tmp stay symlinks into /private)
   - /bin/sh -> bash if the image has no /bin/sh
   - host keys /etc/ssh/ssh_host_{ed25519,rsa}_key (generated here, once)
+  - etc/master.passwd, passwd, group: 'sshd' alias of iOS's _sshd (uid 75),
+    OpenSSH's privilege-separation user
   - /etc/ssh/sshd_config: appends a surya block (key login for root,
     no passwords, no PAM, no DNS lookups)
   - /var/root/.ssh/authorized_keys (0700/0600, owner root)
@@ -92,6 +94,21 @@ def main():
         with open(cfg, 'a') as f:
             f.write(SSHD_BLOCK)
         print(f'{cfg}: surya block appended')
+
+    # OpenSSH's privilege-separation user is "sshd" (strings in usr/sbin/sshd);
+    # iOS ships it as "_sshd" (uid/gid 75). Add an "sshd" alias with the same ids.
+    for name, line in (('master.passwd', 'sshd:*:75:75::0:0:sshd Privilege separation:/var/empty:/usr/bin/false\n'),
+                       ('passwd', 'sshd:*:75:75:sshd Privilege separation:/var/empty:/usr/bin/false\n'),
+                       ('group', 'sshd:*:75:\n')):
+        path = os.path.join(etc, name)
+        if os.path.exists(path):
+            text = open(path).read()
+            if not any(l.startswith('sshd:') for l in text.splitlines()):
+                with open(path, 'a') as f:
+                    if text and not text.endswith('\n'):
+                        f.write('\n')
+                    f.write(line)
+                print(f'{path}: sshd alias added')
 
     var = os.path.join(root, 'private/var') if os.path.isdir(os.path.join(root, 'private/var')) else os.path.join(root, 'var')
     dotssh = os.path.join(var, 'root/.ssh')

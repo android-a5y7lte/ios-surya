@@ -478,6 +478,12 @@ failed/was interrupted (first boot ran 15 min at cpus=1), lsd left the `.error` 
 keeps using a database without plug-ins. Patch **0088** prints the marker's contents
 (`VFS LaunchServices.error size N read err E: text`). Likely fix afterwards: make lsd
 rebuild (move the csstore and .error aside — needs approval, it changes userdata).
+**Live-3 (0088):** `VFS LaunchServices.error size 0` → the marker is an **empty file**.
+Patch **0089** `surya-ls-reset`: boot-arg `sweetlsreset=1` renames
+`com.apple.LaunchServices-4035-v2.csstore` and `com.apple.LaunchServices.error` in lsd's
+Caches dir to `*.sweetbak` (RENAME_EXCL, kernel context) when lsd first stats its
+`.syncInterrupted` marker, i.e. before it opens the database → lsd builds a new one.
+Reversible (rename back); use for one boot only.
 
 ## Backlight plan (research 2026-10-23)
 

@@ -1,0 +1,58 @@
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -5038,6 +5038,45 @@
+  * as "VFS name op err N path". At most 400 lines per boot.
+  */
+ static int sweet_vfs_lines;
++static int renameat_internal(vfs_context_t ctx, int fromfd, user_addr_t from,
++    int tofd, user_addr_t to, int segflg, u_int uflags);
++
++/*
++ * Boot-arg sweetlsreset=1: when lsd first checks for its
++ * "...Caches/com.apple.LaunchServices.syncInterrupted" marker (before it
++ * opens its database), rename the database and the empty ".error" marker in
++ * that Caches directory to "<name>.sweetbak" (never overwriting an existing
++ * backup), so lsd builds a fresh database this boot. Reversible: rename
++ * the .sweetbak files back. Once per boot; remove the boot-arg afterwards.
++ */
++static void
++sweet_ls_reset(const char *marker)
++{
++	static int done;
++	int mode = 0;
++	static const char *const files[] = {
++		"com.apple.LaunchServices-4035-v2.csstore",
++		"com.apple.LaunchServices.error",
++	};
++	const char *tail = "com.apple.LaunchServices.syncInterrupted";
++	size_t ml = strlen(marker), tl = strlen(tail);
++
++	if (done || !PE_parse_boot_argn("sweetlsreset", &mode, sizeof(mode)) || mode != 1 ||
++	    ml <= tl || ml >= 200 || strcmp(marker + ml - tl, tail) != 0) {
++		return;
++	}
++	done = 1;
++	for (unsigned i = 0; i < 2; i++) {
++		char from[256], to[272];
++		strlcpy(from, marker, ml - tl + 1);
++		strlcat(from, files[i], sizeof(from));
++		strlcpy(to, from, sizeof(to));
++		strlcat(to, ".sweetbak", sizeof(to));
++		int e = renameat_internal(vfs_context_kernel(), AT_FDCWD, CAST_USER_ADDR_T(from),
++		    AT_FDCWD, CAST_USER_ADDR_T(to), UIO_SYSSPACE, VFS_RENAME_EXCL);
++		printf("VFS sweetlsreset: rename %s -> .sweetbak err %d\n", files[i], e);
++	}
++}
+ 
+ static void
+ sweet_vfs_log(const char *op, user_addr_t path, enum uio_seg seg, int error)
+@@ -5072,6 +5111,9 @@
+ 	}
+ 	sweet_vfs_lines++;
+ 	printf("VFS %s %s err %d %s\n", name, op, error, buf);
++	if (strcmp(name, "lsd") == 0) {
++		sweet_ls_reset(buf);
++	}
+ 	/*
+ 	 * lsd finds a "com.apple.LaunchServices.error" marker next to its
+ 	 * database and then stops (no plug-in scan): print its text once.

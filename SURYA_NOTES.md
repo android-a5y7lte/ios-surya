@@ -15,6 +15,12 @@ reference. **This file is the handoff for the surya port.**
 
 ## Status
 
+- **2026-10-24 12:28 — 🎉 SSH INTO iOS ON SURYA: `ssh root@192.168.7.2` → `iPhone:~ root#`.**
+  Root image = `ios16-root.img` + `tools/surya-add-ssh.py` (Elucubratus OpenSSH 8.4,
+  bash, coreutils; `sshd` alias of `_sshd`; key-only root login; launchd job
+  com.openssh.sshd) → `ios16-root-ssh.simg`, flashed with owner approval
+  (`fastboot -S 512M flash userdata …`); kernel 10 (0091), `sweetusb=2`.
+
 - **2026-10-24 09:31 — 🎉 USB live log + network work on surya** (upstream 0072-0081,
   `ARGS="... sweetusb=2"`): the PC sees CDC-ECM `enx02005e77ee01`,
   `tools/sweet-usbnet.sh logs/live-N.txt` (run from the repo, `sudo true` first) streams

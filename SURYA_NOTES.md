@@ -779,3 +779,19 @@ the dyld shared cache), then register as "AMFI" with a minimal mpo_policy_syscal
   `left/center/right value`, `left/right channel`;
   `data exchange blocks` -> entries with `block ID`, `descriptor`, `mapping options`; `supports prewarming`.
   (Device class in CoreAudio: HALS_IOA2UCDevice = IOAudio2 user-client device.)
+- test12 (kernel 12 = 0093): `SWEET AMFI: lsd syscall 0x60` answered, "Policy not found" gone, but lsd still
+  logs `Failed to read extension point cache … Code=12 "Unable to find AMFI"`; 0 APPEX; PosterBoard still traps
+  in first-time setup (crash report …161518). Boots in the decoded log are told apart by boot_uuid
+  (timestamps restart at 1970 every boot): test11 = CE0E180B, test12 = 88C6861D. The nil-object PosterBoard
+  crash (…163313, `-[PBFHomeScreenPreviewImageBuilder _imageForView:]` -> `attempt to insert nil object
+  from objects[1]`) happened late in the test11 boot, not in test12.
+- Second AMFI dependency (verified, disassembly of `+[NSDictionary(ExtensionKitAdditions)
+  _EX_dictionaryWithSignedURL:error:]`, logs/ex_signedurl.txt on the PC): entitlement check
+  `com.apple.private.amfi.can-check-trust-cache`; `SecStaticCodeCreateWithPath` + `SecCodeSetDetachedSignature`
+  (<plist>.sig) + `SecStaticCodeCheckValidity` + `SecCodeCopySigningInformation` (kSecCodeInfoUnique = cdhash)
+  + `SecCodeMapMemory`; then `IOServiceMatching("AppleMobileFileIntegrity")`, `IOServiceOpen(type 0)`,
+  `IOConnectCallMethod(sel 6, scalar in {1}, struct in = cdhash, no outputs)`: 0 -> "cdhash: %@ is trusted",
+  0xe00002f0 -> "not in trust cache", else "Unknown error". No such service -> "Unable to find AMFI".
+- Patch 0094 (`0094-surya-amfi-iokit-service.patch`): IOService class `AppleMobileFileIntegrity` (IOResources
+  match) + `SweetAMFIUserClient`: selector 6 with a 20..64-byte cdhash -> kIOReturnSuccess (root filesystem is
+  the trust anchor, as in sweet_amfi.c); other selectors kIOReturnUnsupported; logs `SWEET AMFI kext: …`.

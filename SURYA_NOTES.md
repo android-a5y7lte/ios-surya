@@ -895,3 +895,11 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   replays from boot; IOLog lines from IOResources start() (SWEET GPU, "SWEET AUDIO2 ... stub published",
   "AppleMobileFileIntegrity service published") are lost, later ones (after USB is up) arrive. Patch 0097: the
   G1 probe logs with printf.
+- **G1 result (test17, kernel 15 = 0097; verified):** GPU AHB clock is on (GPUCC was read). GPLL0 / GPLL0_DIV for the
+  GPU **not voted** (0x52004 = 0x01241d7b). **CX GDSC 0x00222001 and GX GDSC 0x00222001: SW_COLLAPSE set, PWR_ON
+  clear -> both off** (as on sweet/SDM845: ABL leaves the GPU off). cx_gmu CBCR 0x80004220 (off; wake/sleep field
+  already 0x42), cxo CBCR 0x80000001 (enabled, not running: CX off), cxo_aon 0, crc_ahb 0, cx_snoc_dvm 0x80000000,
+  GMU RCG cmd 0x80000000 cfg 0 (root off). Speed bin = 0xa7 (qfprom 0x41a0 = 0x14e68410, bits 21..28) ->
+  dt `qcom,gpu-pwrlevels-4`: 800 / 650 / 565 / 430 / 355 / 267 / 180 MHz, initial level 6 (180 MHz). The first
+  lines (header + GCC CBCRs) fell off the start of the live log's 64 KiB backlog. Next: G2 (CX GDSC on, GPLL0
+  votes, GMU clock 200 MHz, CX clocks) after the SM7150 fork's 0079 and Bergamota stage 2.

@@ -15,6 +15,9 @@ on:
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
+      runner:
+        description: macos-15 (Xcode 16, needs patch 0096) or macos-14 (Xcode 15, retired 2026-11-02)
+        default: macos-15
   push:
     branches: [main]
     paths:
@@ -34,9 +37,9 @@ env:
 
 jobs:
   build:
-    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
-    # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
-    runs-on: macos-14
+    # macos-14 (Xcode 15) is retired on 2026-11-02. On macos-15, Xcode 16's iig emits
+    # IORPC.kernelContent, which xnu-8796 lacks: patch 0096 adds it as in xnu-11215.
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +64,9 @@ jobs:
           sudo chmod +x /usr/local/bin/xcodes
           sw_vers
           ls -d /Applications/Xcode*.app
-          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          # macos-14: the oldest Xcode (15.x); macos-15: Xcode 16.2 if present, else the oldest 16.x
+          XC=$(ls -d /Applications/Xcode_16.2*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XC" ] || XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
           echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XC"
           xcodebuild -version

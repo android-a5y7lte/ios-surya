@@ -873,3 +873,10 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   Test artefact, not a DNS failure; the script now uses fd 9.
 - Safari loads web pages over the USB internet (user, 2026-11-01), but has trouble drawing the page text
   (not investigated yet; WebKit's GPU/WebContent process and missing GPU/Metal are the first suspects).
+
+### CI: macos-14 retired (2026-11-02) -> macos-15 + Xcode 16
+- GitHub retires the macos-14 runner image on 2026-11-02 (brownouts in October, reduced capacity -> run #19 sat in
+  "Queued"). macos-14 was used for Xcode 15, whose iig matches xnu-8796's IORPC. Patch 0096 adds
+  `IORPCMessage *kernelContent` to `struct IORPC` (KERNEL only) and fills it at the two IORPC constructions in
+  IOUserServer.cpp, as xnu-11215 does, so Xcode 16's iig output compiles. Workflow: input `runner` (default
+  macos-15), Xcode 16.2 if present. Not yet built: the first macos-15 run may show more Xcode 16 issues (make -k).

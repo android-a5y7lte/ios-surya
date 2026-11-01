@@ -907,3 +907,6 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   `SystemDataOnly-com.apple.LaunchServices-4035-v2.csstore`, and uses the first free backup name `.sweetbak`,
   `.sweetbak2` .. `.sweetbak9` instead of giving up with err 17 when `.sweetbak` exists. Log line per file:
   `VFS sweetlsreset: rename <file> -> <suffix> err N`. No more manual renames over SSH before a reset.
+- 0098 verified (test18, kernel 16): `rename …csstore -> .sweetbak2 err 0` (a .sweetbak from test14 existed),
+  `rename SystemDataOnly-…csstore -> .sweetbak err 0`, `….error -> err 2 (no such file)` (harmless). Reset boots
+  sit on the Apple logo for ~15-20 min while lsd rebuilds.

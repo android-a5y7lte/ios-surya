@@ -880,3 +880,13 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   `IORPCMessage *kernelContent` to `struct IORPC` (KERNEL only) and fills it at the two IORPC constructions in
   IOUserServer.cpp, as xnu-11215 does, so Xcode 16's iig output compiles. Workflow: input `runner` (default
   macos-15), Xcode 16.2 if present. Not yet built: the first macos-15 run may show more Xcode 16 issues (make -k).
+- **oosexgang/hakios-metal** (MIT, last commit 2026-11-01): a real Metal driver for the Adreno in C++, no Mesa GL in
+  between: PM4 packets, a6xx registers checked against Mesa's XML, buffers/submits/fences over the msm-style requests of
+  HakiOS's kernel GPU driver, compute dispatch, textures/samplers, sysmem draws (one colour target), clears, blending;
+  AIR -> NIR (HakiOS front end) -> ir3 (Mesa) compiled on the device; an MTLDevice plug-in so
+  `MTLCreateSystemDefaultDevice()` returns it. Measured on the phone (Oct 28-29): Apple kernels from PortraitFilters
+  bit-exact vs an LLVM reference; triangles/clears/blends exact. Not yet: GMEM, MSAA, many formats; CoreAnimation not
+  on it. Hard-wired to chip 0x06030500 (A635 family = Mesa "a6xx gen4"); our A618 is "a6xx gen1" -> the chip
+  constants/magic registers (Mesa freedreno_devices.py) would need a second row. Builds for iOS on Linux with HakiOS's
+  cross toolchain (`make ios`), which may also be our route for Mesa (no Mac needed). Depends on the kernel GPU
+  driver (our G1..G7) being in place first.

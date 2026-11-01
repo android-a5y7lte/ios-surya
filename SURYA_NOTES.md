@@ -862,3 +862,6 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   (no ping in that package). Result: `exec 3<>/dev/tcp/1.1.1.1/80` from the phone connects.
 - `tools/surya-usb-internet.sh` does both sides (temporary, rerun after a reboot). DNS / iOS's own view (configd,
   Safari) not checked yet: ue0 is created by the kernel without configd knowing it.
+- DNS: iOS ships no scutil (and Elucubratus has none), so `tools/suryanet/` (our own, built on Linux with clang +
+  ld64.lld, .tbd stubs, ad-hoc signed; `tools/suryanet/build.sh`) publishes State:/Network/Service/surya-usb/IPv4
+  {192.168.7.2/24, Router 192.168.7.1, ue0} and /DNS {1.1.1.1, 8.8.8.8} to configd. Copy to /var/root/bin, run as root.

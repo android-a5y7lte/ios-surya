@@ -1,0 +1,8 @@
+--- !tapi-tbd
+tbd-version: 4
+targets: [ arm64-ios ]
+install-name: '/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration'
+exports:
+  - targets: [ arm64-ios ]
+    symbols: [ _SCDynamicStoreCreate, _SCDynamicStoreSetValue, _SCDynamicStoreCopyValue, _SCError, _SCErrorString ]
+...

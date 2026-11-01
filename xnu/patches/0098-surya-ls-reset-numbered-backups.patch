@@ -1,0 +1,68 @@
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index ad3cbe7..3b2899a 100644
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -5044,10 +5044,15 @@ static int renameat_internal(vfs_context_t ctx, int fromfd, user_addr_t from,
+ /*
+  * Boot-arg sweetlsreset=1: when lsd first checks for its
+  * "...Caches/com.apple.LaunchServices.syncInterrupted" marker (before it
+- * opens its database), rename the database and the empty ".error" marker in
+- * that Caches directory to "<name>.sweetbak" (never overwriting an existing
+- * backup), so lsd builds a fresh database this boot. Reversible: rename
+- * the .sweetbak files back. Once per boot; remove the boot-arg afterwards.
++ * opens its database), rename both databases (the main store and the
++ * SystemDataOnly store, which holds the system apps and their extensions)
++ * and the empty ".error" marker in that Caches directory, so lsd builds a
++ * fresh database this boot. Each file goes to "<name>.sweetbak", or, when
++ * that backup already exists, to the first free "<name>.sweetbak2" ..
++ * ".sweetbak9" (patch 0098; before, an existing .sweetbak made the reset
++ * silently do nothing, err 17). Nothing is overwritten or deleted:
++ * reversible by renaming a backup back. Once per boot; remove the boot-arg
++ * afterwards.
+  */
+ static void
+ sweet_ls_reset(const char *marker)
+@@ -5056,25 +5061,35 @@ sweet_ls_reset(const char *marker)
+ 	int mode = 0;
+ 	static const char *const files[] = {
+ 		"com.apple.LaunchServices-4035-v2.csstore",
++		"SystemDataOnly-com.apple.LaunchServices-4035-v2.csstore",
+ 		"com.apple.LaunchServices.error",
+ 	};
+ 	const char *tail = "com.apple.LaunchServices.syncInterrupted";
+ 	size_t ml = strlen(marker), tl = strlen(tail);
+ 
+ 	if (done || !PE_parse_boot_argn("sweetlsreset", &mode, sizeof(mode)) || mode != 1 ||
+-	    ml <= tl || ml >= 200 || strcmp(marker + ml - tl, tail) != 0) {
++	    ml <= tl || ml >= 160 || strcmp(marker + ml - tl, tail) != 0) {
+ 		return;
+ 	}
+ 	done = 1;
+-	for (unsigned i = 0; i < 2; i++) {
+-		char from[256], to[272];
++	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
++		char from[256], to[272], suffix[12];
++		int e = EEXIST;
+ 		strlcpy(from, marker, ml - tl + 1);
+ 		strlcat(from, files[i], sizeof(from));
+-		strlcpy(to, from, sizeof(to));
+-		strlcat(to, ".sweetbak", sizeof(to));
+-		int e = renameat_internal(vfs_context_kernel(), AT_FDCWD, CAST_USER_ADDR_T(from),
+-		    AT_FDCWD, CAST_USER_ADDR_T(to), UIO_SYSSPACE, VFS_RENAME_EXCL);
+-		printf("VFS sweetlsreset: rename %s -> .sweetbak err %d\n", files[i], e);
++		for (int n = 1; n <= 9 && e == EEXIST; n++) {
++			if (n == 1) {
++				strlcpy(suffix, ".sweetbak", sizeof(suffix));
++			} else {
++				snprintf(suffix, sizeof(suffix), ".sweetbak%d", n);
++			}
++			strlcpy(to, from, sizeof(to));
++			strlcat(to, suffix, sizeof(to));
++			e = renameat_internal(vfs_context_kernel(), AT_FDCWD, CAST_USER_ADDR_T(from),
++			    AT_FDCWD, CAST_USER_ADDR_T(to), UIO_SYSSPACE, VFS_RENAME_EXCL);
++		}
++		printf("VFS sweetlsreset: rename %s -> %s err %d%s\n", files[i], suffix, e,
++		    e == 0 ? "" : (e == ENOENT ? " (no such file)" : (e == EEXIST ? " (all 9 backup names taken)" : "")));
+ 	}
+ }
+ 

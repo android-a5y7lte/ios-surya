@@ -903,3 +903,7 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   dt `qcom,gpu-pwrlevels-4`: 800 / 650 / 565 / 430 / 355 / 267 / 180 MHz, initial level 6 (180 MHz). The first
   lines (header + GCC CBCRs) fell off the start of the live log's 64 KiB backlog. Next: G2 (CX GDSC on, GPLL0
   votes, GMU clock 200 MHz, CX clocks) after the SM7150 fork's 0079 and Bergamota stage 2.
+- Patch 0098 (`0098-surya-ls-reset-numbered-backups.patch`): `sweetlsreset=1` now also moves
+  `SystemDataOnly-com.apple.LaunchServices-4035-v2.csstore`, and uses the first free backup name `.sweetbak`,
+  `.sweetbak2` .. `.sweetbak9` instead of giving up with err 17 when `.sweetbak` exists. Log line per file:
+  `VFS sweetlsreset: rename <file> -> <suffix> err N`. No more manual renames over SSH before a reset.

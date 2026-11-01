@@ -1,0 +1,53 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 10d564d..dfa8d17 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -10,6 +10,8 @@
+  *     GDSC, GMU / CXO clocks, GMU clock source - only if the GPU's AHB clock
+  *     (GCC 0x71004) runs, since reading an unclocked block can stall the bus.
+  * Nothing is written; the GPU stays as the boot loader left it.
++ * Logged with printf, not IOLog: IOLog does not reach the message buffer that
++ * the USB live log replays from boot (patch 0097).
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <IOKit/IOService.h>
+@@ -66,32 +68,32 @@ SweetGPU::start(IOService *provider)
+ 	if (enabled < 1 || !IOService::start(provider)) {
+ 		return false;
+ 	}
+-	IOLog("SWEET GPU: G1 read-only probe (Adreno 618, chipid 0x06010800)\n");
++	printf("SWEET GPU: G1 read-only probe (Adreno 618, chipid 0x06010800)\n");
+ 
+ 	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
+ 	for (unsigned i = 0; i < sizeof(gcc_regs) / sizeof(gcc_regs[0]); i++) {
+ 		uint32_t v = rd(gcc, gcc_regs[i].off);
+-		IOLog("SWEET GPU: %s = 0x%08x%s\n", gcc_regs[i].name, v,
++		printf("SWEET GPU: %s = 0x%08x%s\n", gcc_regs[i].name, v,
+ 		    gcc_regs[i].off == 0x52004 ? "" : ((v & 0x80000000u) ? " (off)" : " (on)"));
+ 	}
+ 	uint32_t vote = rd(gcc, 0x52004);
+-	IOLog("SWEET GPU: gpll0 for gpu %s, gpll0_div for gpu %s\n",
++	printf("SWEET GPU: gpll0 for gpu %s, gpll0_div for gpu %s\n",
+ 	    (vote & (1u << 15)) ? "voted" : "not voted", (vote & (1u << 16)) ? "voted" : "not voted");
+ 
+ 	vm_offset_t qf = ml_io_map(QFPROM_PA, QFPROM_SIZE);
+ 	uint32_t fuse = rd(qf, 0x41a0);
+-	IOLog("SWEET GPU: qfprom 0x41a0 = 0x%08x, speed bin %u\n", fuse, (fuse & 0x1fe00000u) >> 21);
++	printf("SWEET GPU: qfprom 0x41a0 = 0x%08x, speed bin %u\n", fuse, (fuse & 0x1fe00000u) >> 21);
+ 
+ 	bool ahb_on = !(rd(gcc, 0x71004) & 0x80000000u);
+ 	if (!ahb_on) {
+-		IOLog("SWEET GPU: GPU AHB clock off, GPUCC not read\n");
++		printf("SWEET GPU: GPU AHB clock off, GPUCC not read\n");
+ 	} else {
+ 		vm_offset_t cc = ml_io_map(GPUCC_PA, GPUCC_SIZE);
+ 		for (unsigned i = 0; i < sizeof(gpucc_regs) / sizeof(gpucc_regs[0]); i++) {
+-			IOLog("SWEET GPU: %s = 0x%08x\n", gpucc_regs[i].name, rd(cc, gpucc_regs[i].off));
++			printf("SWEET GPU: %s = 0x%08x\n", gpucc_regs[i].name, rd(cc, gpucc_regs[i].off));
+ 		}
+ 	}
+-	IOLog("SWEET GPU: G1 done\n");
++	printf("SWEET GPU: G1 done\n");
+ 	return true;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

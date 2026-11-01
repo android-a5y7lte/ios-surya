@@ -890,3 +890,8 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   constants/magic registers (Mesa freedreno_devices.py) would need a second row. Builds for iOS on Linux with HakiOS's
   cross toolchain (`make ios`), which may also be our route for Mesa (no Mac needed). Depends on the kernel GPU
   driver (our G1..G7) being in place first.
+- test16 (kernel 14 = run #21, first macos-15/Xcode 16 build; boots normally): no `SWEET GPU` lines. Cause: IOLog
+  writes to the console only (`_IOLogv` -> os_log + console_printbuf), not the message buffer the USB live log
+  replays from boot; IOLog lines from IOResources start() (SWEET GPU, "SWEET AUDIO2 ... stub published",
+  "AppleMobileFileIntegrity service published") are lost, later ones (after USB is up) arrive. Patch 0097: the
+  G1 probe logs with printf.

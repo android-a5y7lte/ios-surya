@@ -910,3 +910,6 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
 - 0098 verified (test18, kernel 16): `rename …csstore -> .sweetbak2 err 0` (a .sweetbak from test14 existed),
   `rename SystemDataOnly-…csstore -> .sweetbak err 0`, `….error -> err 2 (no such file)` (harmless). Reset boots
   sit on the Apple logo for ~15-20 min while lsd rebuilds.
+- test18 after the automatic reset: lock-screen battery widgets (93%), Today view Batteries widget (93%) and Screen
+  Time placeholder all back without any manual step (evidence/test18-*). App Library background still white (blur,
+  needs the GPU; unchanged, not related to the reset).

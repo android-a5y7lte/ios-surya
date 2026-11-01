@@ -924,3 +924,14 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   the phone's interface before sweet-usbnet.sh claims it; harmless.
 - A phone that restarts on its own shows the POCO logo and stays there (ABL boots the Android boot partition, which
   cannot start with userdata holding the iOS root): Power + Volume Down -> fastboot boot the shim image again.
+
+### Safari white page (2026-11-01)
+- Crash reports after a white Safari page: no JetsamEvent, no WebContent report -> WebKit helpers are neither
+  memory-killed nor crashing; the earlier EXIT lines were SIGKILL (ns 2 code 9) from another process. iOS's own log
+  of the current boot is not on disk yet (decoder sees only boot-time stamps; the evening boot is missing).
+- Patch 0099 (`0099-surya-kill-sender-log.patch`): kernel logs every SIGKILL via kill(2) and every
+  terminate_with_payload from another process: `KILL sender[pid] -> target[pid] via kill|terminate_with_payload
+  ns N code 0x.. <reason string>` (max 300 lines/boot). Test: open Safari on a page, then
+  `grep -a "^KILL" logs/testNN.txt | grep -i webkit`.
+- Side findings: the phone's clock is set from the network now (crash reports dated 2026-11-01); new
+  AegirPoster-…ips crash (astronomy wallpaper extension), not looked at yet.

@@ -1,0 +1,66 @@
+diff --git a/bsd/kern/kern_sig.c b/bsd/kern/kern_sig.c
+index ca53f9b..c85f530 100644
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -1363,6 +1363,37 @@ sigaltstack(__unused proc_t p, struct sigaltstack_args *uap, __unused int32_t *r
+ 	return 0;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * surya (patch 0099): who kills whom. One line per SIGKILL sent with kill(2)
++ * and per terminate_with_payload/reason (runningboardd, launchd, ...) from
++ * another process: "KILL sender[pid] -> target[pid] via ns N code 0x.. why".
++ * At most 300 lines per boot.
++ */
++static int sweet_kill_lines;
++
++static void
++sweet_kill_log(proc_t sender, proc_t target, const char *via, uint32_t ns, uint64_t code,
++    user_addr_t reason_string)
++{
++	char why[96] = "";
++	size_t len = 0;
++
++	if (sweet_kill_lines >= 300 || sender == target) {
++		return;
++	}
++	sweet_kill_lines++;
++	if (reason_string != USER_ADDR_NULL &&
++	    copyinstr(reason_string, why, sizeof(why), &len) != 0 && len == 0) {
++		why[0] = '\0';
++	}
++	why[sizeof(why) - 1] = '\0';
++	printf("KILL %s[%d] -> %s[%d] via %s ns %u code 0x%llx %s\n",
++	    proc_best_name(sender), proc_getpid(sender), proc_best_name(target), proc_getpid(target),
++	    via, ns, code, why);
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ int
+ kill(proc_t cp, struct kill_args *uap, __unused int32_t *retval)
+ {
+@@ -1393,6 +1424,11 @@ kill(proc_t cp, struct kill_args *uap, __unused int32_t *retval)
+ 			proc_rele(p);
+ 			return EPERM;
+ 		}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if (uap->signum == SIGKILL) {
++			sweet_kill_log(cp, p, "kill", 0, SIGKILL, USER_ADDR_NULL);
++		}
++#endif
+ 		if (uap->signum) {
+ 			psignal(p, uap->signum);
+ 		}
+@@ -1572,6 +1608,11 @@ terminate_with_payload_internal(struct proc *cur_proc, int target_pid, uint32_t
+ 		return EPERM;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	sweet_kill_log(cur_proc, target_proc, "terminate_with_payload", reason_namespace, reason_code,
++	    reason_string);
++#endif
++
+ 	if (target_pid != proc_getpid(cur_proc)) {
+ 		/*
+ 		 * FLAG_ABORT should only be set on terminate_with_reason(getpid()) that

@@ -855,3 +855,10 @@ command; G7 IOKit client (RedwoodGPU-style) + Mesa freedreno (a618) in backboard
 - **ios-topaz**: HakiOS's stack ported to Adreno 610 in ~2 days.
 Plan stays G1..G8; for G2-G6 follow the SM7150 fork's verified order (CX power, SMMU/TCM, GMU boot, HFI, GX, SCM
 crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-topaz / Bergamota.
+
+### Internet over USB (2026-11-01, verified)
+- PC: forwarding + NAT (192.168.7.0/24 -> default-route interface); phone: default route via 192.168.7.1.
+  `route`/`netstat`/`ifconfig` from Elucubratus `network-cmds_543-1` (debs/1443.00/) copied to /var/root/bin
+  (no ping in that package). Result: `exec 3<>/dev/tcp/1.1.1.1/80` from the phone connects.
+- `tools/surya-usb-internet.sh` does both sides (temporary, rerun after a reboot). DNS / iOS's own view (configd,
+  Safari) not checked yet: ue0 is created by the kernel without configd knowing it.

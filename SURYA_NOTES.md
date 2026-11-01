@@ -913,3 +913,7 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
 - test18 after the automatic reset: lock-screen battery widgets (93%), Today view Batteries widget (93%) and Screen
   Time placeholder all back without any manual step (evidence/test18-*). App Library background still white (blur,
   needs the GPU; unchanged, not related to the reset).
+- Boot-time internet: `tools/surya-netboot-install.py` (run on the PC with the phone up) copies
+  tools/surya-netboot.sh + suryanet to /var/root/bin and adds launchd job com.surya.netboot (RunAtLoad) to
+  /System/Library/xpc/launchd.plist like surya-add-ssh.py did; keeps launchd.plist.before-netboot on the phone;
+  `--remove` takes it out. The job retries route + suryanet for 5 min, log /var/root/netboot.log.

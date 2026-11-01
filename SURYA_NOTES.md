@@ -865,3 +865,6 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
 - DNS: iOS ships no scutil (and Elucubratus has none), so `tools/suryanet/` (our own, built on Linux with clang +
   ld64.lld, .tbd stubs, ad-hoc signed; `tools/suryanet/build.sh`) publishes State:/Network/Service/surya-usb/IPv4
   {192.168.7.2/24, Router 192.168.7.1, ue0} and /DNS {1.1.1.1, 8.8.8.8} to configd. Copy to /var/root/bin, run as root.
+- Verified 2026-11-01: after `suryanet`, names resolve on the phone ("internet works"). tools/surya-usb-internet.sh
+  now also runs suryanet and tests TCP + DNS. (A test with `exec 3<>/dev/tcp/...` in the login shell ended the SSH
+  session once; the script uses `bash -c`.)

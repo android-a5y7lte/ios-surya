@@ -838,3 +838,20 @@ command; G7 IOKit client (RedwoodGPU-style) + Mesa freedreno (a618) in backboard
   speed bin (bits 21..28), and GPUCC 0x5090000 (sc7180 offsets: cxo_aon 0x1004, gx_gdscr 0x100c, cx_gdscr 0x106c,
   crc_ahb 0x107c, cx_snoc_dvm 0x108c, cx_gmu 0x1098, cxo 0x109c, gmu rcgr 0x1120/0x1124) only if the GPU AHB clock
   is on. Log lines `SWEET GPU: …`.
+
+### GPU prior art survey (2026-11-01)
+- **mxtpasontop/ios-sweet, branch `gpu`** (patches 0078-0098): Adreno 618 on **SM7150 (Redmi Note 10 Pro = same SoC as
+  surya)**, same ios-sweet code base. Hardware results in its NOTES.md: SCM/PAS queries (0088), crypto BCM vote for PAS
+  (0089/0090), GMU boot + HFI + GX power + **signed zap authenticated via PAS id 13** (0092, status 0 for INIT_IMAGE,
+  MEM_SETUP, AUTH_AND_RESET, SHUTDOWN), CP memory + SMMU CB1/SID0 set up (0093); **stuck at CP start** (0097: writing
+  CP_SQE_CNTL=3 cold raised CP_IRQ bit 7 = illegal instruction); last commit 2026-10-20 (0098 not booted). Repository
+  has no licence file for its additions -> use as a reference (facts, order), write our own code, credit it.
+- **ry-diffusion/bergamota** (Poco F1, SDM845, Adreno 630, same GMU generation): docs/GPU_A630_BRINGUP.md, stages 1-7
+  (probe, CX power, GMU firmware, SMMU + HFI v1, GX, zap, CP), keep-up + IOKit client (patches 0180-0182), EAGL + Mesa
+  payload (`bglrender`); notes SM7150 values: GPU PDC cfg/seq 0xb290000/0xb490000, GCC ddrss_gpu_axi 0x4452c, "ABL
+  leaves the GPU off on SM7150". Its Mesa/EAGL build needs a Mac with Xcode.
+- **HakiOS** (now `hakios-xnu-kernel`, device repos via tools/hakios-device.py; redwood = hakios-sm7325): full working
+  CP + Mesa freedreno + EAGL stack (MIT / APSL 2.0); Metal "partly, nothing drawn yet".
+- **ios-topaz**: HakiOS's stack ported to Adreno 610 in ~2 days.
+Plan stays G1..G8; for G2-G6 follow the SM7150 fork's verified order (CX power, SMMU/TCM, GMU boot, HFI, GX, SCM
+crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-topaz / Bergamota.

@@ -24,5 +24,5 @@ sudo iptables -C FORWARD -i "$WAN" -o "$IF" -m state --state RELATED,ESTABLISHED
 	sudo iptables -A FORWARD -i "$WAN" -o "$IF" -m state --state RELATED,ESTABLISHED -j ACCEPT
 ssh root@192.168.7.2 '/var/root/bin/route -n add default 192.168.7.1 2>&1 | tail -1
 	[ -x /var/root/bin/suryanet ] && /var/root/bin/suryanet >/dev/null && echo "phone: configd has ue0 + DNS"
-	bash -c "exec 3<>/dev/tcp/1.1.1.1/80" && echo "phone: TCP to 1.1.1.1 works"
-	bash -c "exec 3<>/dev/tcp/apple.com/80" && echo "phone: DNS works"'
+	bash -c "exec 9<>/dev/tcp/1.1.1.1/80" && echo "phone: TCP to 1.1.1.1 works"
+	bash -c "exec 9<>/dev/tcp/apple.com/80" && echo "phone: DNS works"'

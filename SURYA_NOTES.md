@@ -871,3 +871,5 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
 - `bash` "Killed: 9" during the DNS test = guard exception (reason ns 23, code 0x4000000200000003: GUARD_TYPE_FD,
   flavor dup, fd 3): the resolver's guarded fd to mDNSResponder was fd 3 and the test's `exec 3<>` dup'ed over it.
   Test artefact, not a DNS failure; the script now uses fd 9.
+- Safari loads web pages over the USB internet (user, 2026-11-01), but has trouble drawing the page text
+  (not investigated yet; WebKit's GPU/WebContent process and missing GPU/Metal are the first suspects).

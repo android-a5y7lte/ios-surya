@@ -935,3 +935,18 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   `grep -a "^KILL" logs/testNN.txt | grep -i webkit`.
 - Side findings: the phone's clock is set from the network now (crash reports dated 2026-11-01); new
   AegirPoster-…ips crash (astronomy wallpaper extension), not looked at yet.
+
+### HakiOS ecosystem survey for the GPU (2026-11-01)
+- hakios-xnu-kernel is now a framework: common kernel + loader + user space, per-device repos (`tools/hakios-device.py
+  new <dev> --soc ... --fdt device-tree.dtb`), every phone driver a config option (`CONFIG_HAKIOS_*`), port order in
+  docs/porting/index.md (CPU/thermal -> buttons/touch -> UFS -> ADRENO (needs fw-gpu/) -> ADSP/audio -> Wi-Fi -> rest).
+  GPU = `drivers/gpu/hakios.adreno.c` + `hakios.gpu.cpp` (Adreno 642L); each driver's header says where its numbers
+  come from.
+- hakios-sm7325 = redwood's device repo (SC7280 family layer in soc/, Mu-Silicium UEFI port, firmware pull scripts).
+  hakios-uefi = the Mu-Silicium based UEFI (patch + files). HakiOS boots via `fastboot boot` of UEFI + its EFI loader.
+- **Mu-Silicium already has surya** (Platforms/Xiaomi/suryaPkg, Resources/DTBs/surya.dts) and sweet_k6a. So a HakiOS
+  port to surya is possible in principle: a new SoC layer for SM7150 ("sdmmagpie"), then drivers one at a time. That
+  would give HakiOS's whole stack (Mesa freedreno + EAGL, hakios-metal, Wi-Fi, audio) as the base instead of ios-sweet;
+  the Adreno driver would still need the A618 (a6xx gen1, GMU with older HFI) adaptation, as in our G2+ plan.
+- Mesa (gitlab.freedesktop.org/mesa/mesa): freedreno/turnip support the A618 (freedreno_devices.py has it); hakios-metal
+  and HakiOS's Mesa build target one chip id and would need the A618 row.

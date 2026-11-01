@@ -917,3 +917,10 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   tools/surya-netboot.sh + suryanet to /var/root/bin and adds launchd job com.surya.netboot (RunAtLoad) to
   /System/Library/xpc/launchd.plist like surya-add-ssh.py did; keeps launchd.plist.before-netboot on the phone;
   `--remove` takes it out. The job retries route + suryanet for 5 min, log /var/root/netboot.log.
+- Boot-time internet verified (test19/test20): /var/root/netboot.log `route + DNS set (try 1)` ~1 min after boot,
+  default route via 192.168.7.1 on ue0, with nothing done by hand on the phone. The PC side still needs
+  tools/sweet-usbnet.sh running (it sets 192.168.7.1 and marks the interface unmanaged for NetworkManager) and
+  tools/surya-usb-internet.sh for forwarding/NAT. Mint's "Connection failed" pop-up = NetworkManager trying DHCP on
+  the phone's interface before sweet-usbnet.sh claims it; harmless.
+- A phone that restarts on its own shows the POCO logo and stays there (ABL boots the Android boot partition, which
+  cannot start with userdata holding the iOS root): Power + Volume Down -> fastboot boot the shim image again.

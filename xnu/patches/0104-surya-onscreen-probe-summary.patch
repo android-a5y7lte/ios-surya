@@ -1,0 +1,131 @@
+diff --git a/iokit/Kernel/arm/SweetShow.cpp b/iokit/Kernel/arm/SweetShow.cpp
+new file mode 100644
+index 0000000..d48ff3a
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetShow.cpp
+@@ -0,0 +1,102 @@
++/*
++ * surya on-screen probe (patch 0104): read-only summary of the regulator rails,
++ * the camera clock controller, and the GPU power state, printed to the phone's
++ * framebuffer console and HELD there on a loop - so results can be read with a
++ * photo when the USB live log is unavailable. Boot-arg sweetshow=1.
++ *
++ * Everything here only READS (SPMI via sweet_spmi.c patch 0083 for the PMIC
++ * LDOs; always-on camcc/gcc register files for the clocks; gpucc only if the
++ * GPU AHB clock is up, as in GPU G1). Nothing is written. After reading once it
++ * loops printing a compact summary every ~3 s so the latest lines stay on the
++ * screen for a photo.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <pexpert/pexpert.h>
++
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern "C" int sweet_spmi_init(void);
++extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++
++class SweetShow : public IOService {
++	OSDeclareDefaultStructors(SweetShow);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetShow, IOService);
++
++#define CAMCC_PA   0x0ad00000u
++#define GCC_PA     0x00100000u
++#define GPUCC_PA   0x05090000u
++#define MAP_SZ     0x00010000u
++
++#define CAMCC_PLL0        0x0000u
++#define CAMCC_CCI0_CBCR   0xb0f0u
++#define CAMCC_TITAN_GDSCR 0xc1c4u
++#define GCC_GPU_AHB_CBCR  0x71004u
++#define GCC_GPU_VOTE      0x52004u
++#define GPUCC_CX_GDSCR    0x106cu
++
++#define BIT31 0x80000000u
++#define LDO_EN 0x46u
++#define EN_ON  0x80u
++
++static inline uint32_t rd(vm_offset_t b, uint32_t o) { return *(volatile uint32_t *)(b + o); }
++
++static const struct { const char *name; unsigned sid, base; } rails[] = {
++	{ "cam_vio",  0x0, 0x4c00 }, { "cam_vana", 0xa, 0x4500 },
++	{ "bt_io",    0x0, 0x4900 }, { "bt_core",  0x4, 0x4100 },
++	{ "bt_pa",    0x4, 0x4900 }, { "bt_xtal",  0x4, 0x4000 },
++};
++
++bool
++SweetShow::start(IOService *provider)
++{
++	int on = 0;
++	(void)PE_parse_boot_argn("sweetshow", &on, sizeof(on));
++	if (on < 1 || !IOService::start(provider)) {
++		return false;
++	}
++
++	/* --- read once --- */
++	char railbuf[160];
++	int n = 0;
++	bool spmi = (sweet_spmi_init() == 0);
++	for (unsigned i = 0; i < 6; i++) {
++		uint8_t en = 0;
++		const char *s = "?";
++		if (spmi && sweet_spmi_read(rails[i].sid, rails[i].base + LDO_EN, &en) == 0) {
++			s = (en & EN_ON) ? "ON" : "off";
++		}
++		n += snprintf(railbuf + n, sizeof(railbuf) - n, "%s=%s ", rails[i].name, s);
++		if (n >= (int)sizeof(railbuf)) { break; }
++	}
++
++	vm_offset_t cc = ml_io_map(CAMCC_PA, MAP_SZ);
++	uint32_t pll0 = rd(cc, CAMCC_PLL0);
++	bool titan = (rd(cc, CAMCC_TITAN_GDSCR) & BIT31) != 0;
++	bool cci = !(rd(cc, CAMCC_CCI0_CBCR) & BIT31);
++
++	vm_offset_t gcc = ml_io_map(GCC_PA, MAP_SZ);
++	uint32_t vote = rd(gcc, GCC_GPU_VOTE);
++	bool gahb = !(rd(gcc, GCC_GPU_AHB_CBCR) & BIT31);
++	const char *cxg = "ahb-off";
++	if (gahb) {
++		vm_offset_t gc = ml_io_map(GPUCC_PA, MAP_SZ);
++		cxg = (rd(gc, GPUCC_CX_GDSCR) & BIT31) ? "PWR_ON" : "off";
++	}
++
++	/* --- hold on screen --- */
++	for (;;) {
++		printf("SWEET SHOW: ===== probe results (photograph) =====\n");
++		printf("SWEET SHOW: rails %s\n", railbuf);
++		printf("SWEET SHOW: cam pll0=0x%08x titan=%s cci0_clk=%s\n",
++		    pll0, titan ? "PWR_ON" : "off", cci ? "on" : "off");
++		printf("SWEET SHOW: gpu gpll0=%s ahb=%s cx_gdsc=%s\n",
++		    (vote & (1u << 15)) ? "voted" : "no", gahb ? "on" : "off", cxg);
++		IOSleep(3000);
++	}
++	return true; /* not reached */
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index d0ca102..e0ca103 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -102,3 +102,8 @@ const char * gIOKernelConfigTables =
+     "     'IOMatchCategory' = SweetRegulator;"
+     "   },"
++    "   {"
++    "     'IOClass'         = SweetShow;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetShow;"
++    "   },"
+ #endif
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index c2ca102..c3ca104 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -24,4 +24,5 @@
+ iokit/Kernel/arm/SweetCamera.cpp                                 optional iokitcpp
+ iokit/Kernel/arm/SweetRegulator.cpp                              optional iokitcpp
++iokit/Kernel/arm/SweetShow.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp

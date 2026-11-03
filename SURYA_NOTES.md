@@ -1124,7 +1124,16 @@ RESULTS:
     all - which would mean the direct-SPMI rail-enable shortcut is out and the RPMh path is required.
     NEXT: read sweet_spmi_read's impl (OBS vs APID), re-check one LDO base against a known-good peripheral,
     re-run R1; if still no response, the camera/BT rails need the RPMh path (bigger).
-NOT YET RUN (next session): G2 (sweetgpu=2), C2a (sweetcam=2) - same log-ring method.
+  - G2 (GPU, sweetgpu=2): SUCCESS, hardware-verified. At boot the GPU CX + GX GDSCs are collapsed
+    (0x00222001), gcc gpu AHB on but memnoc/snoc_dvm off, gpll0 not voted for the GPU. G2 voted gpll0
+    (0x01241d7b -> 0x01259d7b), enabled the gcc memnoc/snoc_dvm branches, POWERED THE CX GDSC
+    (0x00222001 -> 0xf8222000, bit31 PWR_ON), set + updated the GMU clock RCG (cfg 0x602, cmd updated), and
+    brought the CX branches on (cxo, cx_gmu 0x80004220 -> 0x00004221, cx_snoc_dvm, crc_ahb). GX left off (GMU
+    owns it), as intended. => the Adreno 618 CX domain is powered and the GMU rail is clocked - the first GPU
+    power milestone, done on real hardware. Next GPU step: G3/G4 = load the GMU firmware + HFI handshake, then
+    the SMMU, then GX, then the IOKit/Metal provider. (Minor: G1 speed-bin decode printed 167 - the qfprom
+    0x41a0 mask/shift is wrong; cosmetic. Raw fuse 0x14e68410.)
+NOT YET RUN (next session): C2a (sweetcam=2 - power the CCI controller), and the R1 fix. Same log-ring method.
 
 ### WiFi (WCN3990 via icnss): the largest subsystem - long-term, not near-term (2026-11-03)
 Honest feasibility note. WiFi is harder than Bluetooth and on par with / beyond the GPU. Not near-term.

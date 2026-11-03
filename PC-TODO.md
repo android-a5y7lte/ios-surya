@@ -15,6 +15,10 @@ phone (test). Everything else is prepared in the repo already. After any reboot,
 - [ ] **surya-installapp** (sideload apps, no App Store). `tools/surya-installapp.py SOME.ipa` (or a .app),
       `--list`, `--remove NAME`. Try a small self-contained app first. Needs LaunchServices registration:
       if the icon does not appear, reboot once with sweetlsreset=1. Apps needing Apple online services won't run.
+- [ ] **surya-crashlog** (why an app won't open). Open the failing app on the phone, wait a few seconds, then
+      `tools/surya-crashlog.py AppName` (e.g. `MobileSafari`, `Maps`). Prints the exception, termination reason
+      and faulting-thread symbols from the newest .ips. Run with no argument to list all recent crashes.
+      Paste the output back here; the per-app fix follows from what it shows. Reads only.
 
 ## Needs the PC's dyld cache (~/dsc) - disassembly, no phone needed
 - [ ] **Audio next step**: extract the IOAudio2 "data exchange blocks" / "output streams" binary layout

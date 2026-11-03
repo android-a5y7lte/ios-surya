@@ -1101,6 +1101,24 @@ STAGED PLAN:
     VRM enable command. Bigger; only if R2 shows we must.
 Once a rail can be turned on, camera C2b (sensor chip-id) and BT B3 (power WCN3990) both unlock.
 
+### WiFi (WCN3990 via icnss): the largest subsystem - long-term, not near-term (2026-11-03)
+Honest feasibility note. WiFi is harder than Bluetooth and on par with / beyond the GPU. Not near-term.
+Hardware (live.dts): qcom,icnss@0x18800000 (membase 0x18800000 size 0x800000; ~12 copy-engine IRQs
+0x19e-0x1a9; MSA firmware region wlan_msa_region@97500000 size 0x100000; its own SMMU iommus; IPA data-path
+accel qcom,ipa@1e00000). Rails shared with BT on the combo chip: vdd-1.8-xo = pm6150l_l1, vdd-1.3-rfa =
+pm6150l_l2, vdd-3.3-ch0 = pm6150l_l10, plus vdd-cx-mx, vdd-3.3-ch1. smp2p for crash signalling.
+Why it's the biggest effort, three stacked walls:
+  1. The Qualcomm WLAN host stack: icnss bring-up + qcacld-3.0 (WMI command/event protocol, HTC transport,
+     copy-engine Tx/Rx rings over the 0x18800000 window) - tens of thousands of lines in Linux, to port to XNU.
+  2. iOS's WiFi stack (Apple80211/CoreWLAN) targets Apple/Broadcom silicon and has no concept of a Qualcomm
+     chip - so, like GPU/camera, a from-scratch IOKit 80211 provider bridging qcacld to CoreWLAN is needed.
+  3. Firmware + board data (wlan fw MBN + bdwlan) not in our dump - from a vendor image; plus the same PMIC
+     rail power-on wall (the cross-cutting regulator blocker).
+ALTERNATIVE (already working): internet over USB (surya-usb-internet.sh / suryanet) gives the phone internet
+through the PC - enough for Sileo/package installs/updates. So WiFi is NOT blocking the store/app work; it's a
+daily-driver nice-to-have. Recommendation: long-term goal; prioritise GPU (Metal apps) + package manager
+(apps) first; use the USB tether for internet meanwhile. Recorded for whenever we tackle it.
+
 ### App Store: not achievable on this port
 The App Store app launches but cannot function: it needs device activation, an Apple ID and Apple's
 servers (itunesstored/appstored authenticating to Apple), none of which exist on an unactivated,

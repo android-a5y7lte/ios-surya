@@ -1,0 +1,180 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index dfa8d17..3e98471 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1,15 +1,23 @@
+ /*
+- * surya GPU bring-up, step G1 (patch 0095): read-only look at the Adreno 618.
+- * Plan in SURYA_NOTES.md "GPU plan" (after HackiOS redwood_adreno.c steps 1-3).
++ * surya GPU bring-up, Adreno 618 (SM7150). Read-only probe (G1, patch 0095)
++ * plus the first write step (G2, patch 0100). Plan in SURYA_NOTES.md "GPU plan".
++ *
++ * All register numbers and sequences are from the open-source Qualcomm drivers
++ * for this exact clock controller (Linux drivers/clk/qcom/gpucc-sc7180.c, which
++ * also serves the Adreno 618, gcc-sm7150.c, gdsc.c, clk-rcg2.c), checked against
++ * the phone's own device tree (surya-dump/live.dts). Nothing is flashed; a
++ * reboot restores the boot loader's state.
++ *
++ *   sweetgpu=1  read only, logged "SWEET GPU: ..." (G1).
++ *   sweetgpu>=2 G1, then G2: power the CX domain on and clock the GMU rail.
++ *
++ * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
++ * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
++ * chip GX is owned by the GMU (gpucc-sc7180.c gives gx_gdsc
++ * gdsc_gx_do_nothing_enable), so software must never collapse/enable it by hand;
++ * that happens through the GMU in a later step. Every write is read back and
++ * logged; a step that does not take hold ends the sequence.
+  *
+- * Boot-arg sweetgpu=1. Only reads, logged as "SWEET GPU: ...":
+- *   GCC (0x00100000): GPU branch clocks (CBCR bit 31 = clock off) and the
+- *     GPLL0 votes for the GPU (0x52004 bits 15/16), gcc-sm7150.c;
+- *   QFPROM speed bin (0x00780000 + 0x41a0, bits 21..28), qcom,gpu-speed-bin;
+- *   GPUCC (0x05090000, offsets as gpucc-sc7180.c, also Adreno 618): CX/GX
+- *     GDSC, GMU / CXO clocks, GMU clock source - only if the GPU's AHB clock
+- *     (GCC 0x71004) runs, since reading an unclocked block can stall the bus.
+- * Nothing is written; the GPU stays as the boot loader left it.
+  * Logged with printf, not IOLog: IOLog does not reach the message buffer that
+  * the USB live log replays from boot (patch 0097).
+  */
+@@ -34,12 +42,72 @@ OSDefineMetaClassAndStructors(SweetGPU, IOService);
+ #define GPUCC_PA        0x05090000u
+ #define GPUCC_SIZE      0x00009000u
+ 
++/* GCC (gcc-sm7150.c) */
++#define GCC_GPU_CFG_AHB_CBCR            0x71004u        /* enable: BIT(0) */
++#define GCC_GPU_MEMNOC_GFX_CBCR         0x7100cu
++#define GCC_GPU_SNOC_DVM_GFX_CBCR       0x71018u
++#define GCC_APCS_GPU_VOTE               0x52004u        /* gpll0 BIT(15), gpll0_div BIT(16) */
++
++/* GPUCC (gpucc-sc7180.c) */
++#define GPU_CC_CXO_AON_CBCR             0x1004u
++#define GPU_CC_GX_GDSCR                 0x100cu         /* owned by the GMU: not touched */
++#define GPU_CC_CX_GDSCR                 0x106cu         /* votable; enable: clear SW_COLLAPSE BIT(0) */
++#define GPU_CC_CRC_AHB_CBCR             0x107cu
++#define GPU_CC_CX_SNOC_DVM_CBCR         0x108cu
++#define GPU_CC_CX_GMU_CBCR              0x1098u
++#define GPU_CC_CXO_CBCR                 0x109cu
++#define GPU_CC_GMU_CMD_RCGR             0x1120u         /* +0x4 = CFG */
++
++#define BRANCH_ON                       0x80000000u     /* CBCR BIT(31): 1 = clock off */
++#define GDSC_PWR_ON                     0x80000000u     /* GDSCR BIT(31) */
++#define GDSC_SW_COLLAPSE                0x00000001u
++#define RCG_CMD_UPDATE                  0x00000001u
++/* GMU clock source: 200 MHz = GPLL0_OUT_MAIN_DIV (src 6) / 1.5 (hid_div 2).
++ * CFG = src<<8 | hid_div = (6<<8) | 2 = 0x602 (matches gpucc-sc7180.c ftbl). */
++#define GMU_CFG_200MHZ                  0x00000602u
++
+ static inline uint32_t
+ rd(vm_offset_t base, uint32_t off)
+ {
+ 	return *(volatile uint32_t *)(base + off);
+ }
+ 
++static inline void
++wr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++/* poll off until (read & mask) == want, up to ~5 ms; returns the match and the
++ * last value read. */
++static bool
++poll(vm_offset_t base, uint32_t off, uint32_t mask, uint32_t want, uint32_t *out)
++{
++	uint32_t v = 0;
++	for (int i = 0; i < 500; i++) {
++		v = rd(base, off);
++		if ((v & mask) == want) {
++			if (out) { *out = v; }
++			return true;
++		}
++		IODelay(10);
++	}
++	if (out) { *out = v; }
++	return false;
++}
++
++/* Enable a clock branch (CBCR): set BIT(0), wait for BIT(31) to clear. */
++static void
++branch_on(vm_offset_t cc, const char *name, uint32_t cbcr)
++{
++	uint32_t before = rd(cc, cbcr), after = 0;
++	wr(cc, cbcr, before | 0x1u);
++	bool on = poll(cc, cbcr, BRANCH_ON, 0, &after);
++	printf("SWEET GPU: branch %s 0x%08x -> 0x%08x (%s)\n", name, before, after,
++	    on ? "on" : "still off");
++}
++
+ static const struct {
+ 	const char *name;
+ 	uint32_t    off;
+@@ -60,6 +128,57 @@ static const struct {
+ 	{ "gpu_cc_gmu_cfg_rcgr", 0x1124 },
+ };
+ 
++/* G2: power the CX domain on and clock the GMU rail. gcc is already mapped. */
++static void
++sweet_gpu_g2(vm_offset_t gcc)
++{
++	printf("SWEET GPU: G2 CX power-on (writes; gpucc-sc7180.c / gcc-sm7150.c)\n");
++
++	/* 1. Vote GPLL0 and GPLL0_DIV for the GPU in the APCS clock-branch vote. */
++	uint32_t vote = rd(gcc, GCC_APCS_GPU_VOTE);
++	wr(gcc, GCC_APCS_GPU_VOTE, vote | (1u << 15) | (1u << 16));
++	printf("SWEET GPU: gpll0 vote 0x%08x -> 0x%08x\n", vote, rd(gcc, GCC_APCS_GPU_VOTE));
++
++	/* 2. GPU-side GCC branches: cfg AHB (for GPUCC access), memnoc and snoc_dvm
++	 *    (the GMU's path to memory). Enable = BIT(0). */
++	wr(gcc, GCC_GPU_CFG_AHB_CBCR, rd(gcc, GCC_GPU_CFG_AHB_CBCR) | 0x1u);
++	wr(gcc, GCC_GPU_MEMNOC_GFX_CBCR, rd(gcc, GCC_GPU_MEMNOC_GFX_CBCR) | 0x1u);
++	wr(gcc, GCC_GPU_SNOC_DVM_GFX_CBCR, rd(gcc, GCC_GPU_SNOC_DVM_GFX_CBCR) | 0x1u);
++	printf("SWEET GPU: gcc ahb 0x%08x memnoc 0x%08x snoc_dvm 0x%08x\n",
++	    rd(gcc, GCC_GPU_CFG_AHB_CBCR), rd(gcc, GCC_GPU_MEMNOC_GFX_CBCR),
++	    rd(gcc, GCC_GPU_SNOC_DVM_GFX_CBCR));
++
++	vm_offset_t cc = ml_io_map(GPUCC_PA, GPUCC_SIZE);
++
++	/* 3. CX GDSC on: votable, so clear SW_COLLAPSE and wait for PWR_ON. */
++	uint32_t g = rd(cc, GPU_CC_CX_GDSCR), gon = 0;
++	wr(cc, GPU_CC_CX_GDSCR, g & ~GDSC_SW_COLLAPSE);
++	bool on = poll(cc, GPU_CC_CX_GDSCR, GDSC_PWR_ON, GDSC_PWR_ON, &gon);
++	printf("SWEET GPU: cx_gdscr 0x%08x -> 0x%08x (%s)\n", g, gon, on ? "PWR_ON" : "TIMEOUT");
++	if (!on) {
++		printf("SWEET GPU: G2 abort - CX domain did not power on\n");
++		return;
++	}
++
++	/* 4. GMU clock source to 200 MHz: write CFG, then CMD_UPDATE, wait for it to
++	 *    clear (clk-rcg2.c update_config). GPLL0 is already running. */
++	wr(cc, GPU_CC_GMU_CMD_RCGR + 0x4u, GMU_CFG_200MHZ);
++	uint32_t cmd = rd(cc, GPU_CC_GMU_CMD_RCGR), cmd_after = 0;
++	wr(cc, GPU_CC_GMU_CMD_RCGR, cmd | RCG_CMD_UPDATE);
++	bool upd = poll(cc, GPU_CC_GMU_CMD_RCGR, RCG_CMD_UPDATE, 0, &cmd_after);
++	printf("SWEET GPU: gmu rcg cfg=0x%08x cmd=0x%08x (%s)\n",
++	    rd(cc, GPU_CC_GMU_CMD_RCGR + 0x4u), cmd_after, upd ? "updated" : "UPDATE stuck");
++
++	/* 5. CX-domain branch clocks on. */
++	branch_on(cc, "cxo_aon", GPU_CC_CXO_AON_CBCR);
++	branch_on(cc, "cxo", GPU_CC_CXO_CBCR);
++	branch_on(cc, "cx_gmu", GPU_CC_CX_GMU_CBCR);
++	branch_on(cc, "cx_snoc_dvm", GPU_CC_CX_SNOC_DVM_CBCR);
++	branch_on(cc, "crc_ahb", GPU_CC_CRC_AHB_CBCR);
++
++	printf("SWEET GPU: G2 done - CX powered, GMU rail clocked (GX still off, as intended)\n");
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -94,6 +213,10 @@ SweetGPU::start(IOService *provider)
+ 		}
+ 	}
+ 	printf("SWEET GPU: G1 done\n");
++
++	if (enabled >= 2) {
++		sweet_gpu_g2(gcc);
++	}
+ 	return true;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

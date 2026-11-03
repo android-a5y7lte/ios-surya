@@ -950,3 +950,20 @@ crypto vote, PAS zap), for G6-G8 (CP start, client, Mesa) follow HakiOS / ios-to
   the Adreno driver would still need the A618 (a6xx gen1, GMU with older HFI) adaptation, as in our G2+ plan.
 - Mesa (gitlab.freedesktop.org/mesa/mesa): freedreno/turnip support the A618 (freedreno_devices.py has it); hakios-metal
   and HakiOS's Mesa build target one chip id and would need the A618 row.
+
+### G2: CX power-on (patch 0100, boot-arg sweetgpu=2)
+First write step. Register numbers/sequences from the open-source Qualcomm drivers for this clock
+controller (Linux gpucc-sc7180.c - also serves the Adreno 618 - gcc-sm7150.c, gdsc.c, clk-rcg2.c),
+checked against surya-dump/live.dts. CX side only; GX is left off (gpucc-sc7180 gives gx_gdsc
+gdsc_gx_do_nothing_enable: the GMU owns GX, software must not collapse/enable it - that is a later step).
+Steps, each read back and logged "SWEET GPU: ...", aborts if CX GDSC does not reach PWR_ON:
+ 1. Vote GPLL0 + GPLL0_DIV for the GPU: GCC 0x52004 |= BIT(15)|BIT(16).
+ 2. GPU-side GCC branches on (BIT(0)): cfg_ahb 0x71004, memnoc_gfx 0x7100c, snoc_dvm_gfx 0x71018.
+ 3. CX GDSC on (votable): clear SW_COLLAPSE (0x106c BIT(0)), poll PWR_ON (BIT(31)).
+ 4. GMU clock source to 200 MHz: CFG 0x1124 = 0x602 (src 6 = GPLL0_OUT_MAIN_DIV, hid_div 2 = /1.5),
+    then CMD_UPDATE (0x1120 BIT(0)), poll until it clears.
+ 5. CX branches on (set BIT(0), poll BIT(31) clear): cxo_aon 0x1004, cxo 0x109c, cx_gmu 0x1098,
+    cx_snoc_dvm 0x108c, crc_ahb 0x107c.
+Nothing flashed; a reboot restores the boot loader's state. Test: boot sweetgpu=2, then
+`grep -a "SWEET GPU" logs/testNN.txt`. Expect cx_gdscr -> PWR_ON, gmu rcg updated, branches "on".
+Next (G3+): GPU SMMU context, then GMU firmware load + HFI (needs a618_gmu.bin), per the a6xx_gmu.c order.

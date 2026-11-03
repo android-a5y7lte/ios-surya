@@ -1,0 +1,27 @@
+# Work waiting for the PC + phone
+
+Things that can only be done at the PC (build, flash-boot, disassemble the dyld cache) or on the
+phone (test). Everything else is prepared in the repo already. After any reboot, bring the link up:
+`tools/sweet-usbnet.sh logs/testNN.txt` then `tools/surya-usb-internet.sh`.
+
+## Ready to test now (kernels/tools already built or pushed)
+- [ ] **GPU G2** (the main one). Kernel from run 41581107004 (xnu-kernel, patch 0100). Download, unpack,
+      boot with `sweetgpu=2`, then `grep -a "SWEET GPU" logs/testNN.txt`. Watch for `cx_gdscr ... (PWR_ON)`,
+      `gmu rcg ... (updated)`, branches `(on)`. If it hangs/resets, grab whatever SWEET GPU lines logged and
+      Power+VolDown back to fastboot. (Hang => hypervisor blocks a CX write => rethink.)
+- [ ] **suryablur** (white App Library / folders fix, no GPU). `scp tools/suryablur/suryablur
+      root@192.168.7.2:/var/root/bin/`, then `ssh root@192.168.7.2 '/var/root/bin/suryablur 1'`, respring
+      (kill SpringBoard). Photo before/after. `suryablur 0` reverts. Check if it helps Safari too.
+
+## Needs the PC's dyld cache (~/dsc) - disassembly, no phone needed
+- [ ] **Audio next step**: extract the IOAudio2 "data exchange blocks" / "output streams" binary layout
+      (commands in SURYA_NOTES.md "Audio next step"). Paste output back; then the stream code can be written.
+
+## After G2 (depends on its result)
+- [ ] **GPU G3**: GPU SMMU context (read-only dump first). Map ready in SURYA_NOTES.md "G3-G5 reference map".
+- [ ] **GPU G4**: GMU firmware (a630_gmu.bin) + HFI. Needs a630_gmu.bin + a630_sqe.fw (linux-firmware) and
+      the a615_zap we already have; decide ADT vs iOS-root delivery.
+
+## Firmware to fetch from a stock surya vendor image (phone no longer runs Android)
+- [ ] a630_gmu.bin, a630_sqe.fw (GPU) - linux-firmware qcom/
+- [ ] QCA Bluetooth firmware crbtfw*.tlv + crnv*.bin (WCN3990) - from a surya vendor.img (not in our dump)

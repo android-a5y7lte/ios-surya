@@ -1027,3 +1027,20 @@ IOAudio2 device must advertise, get the binary layout CoreAudio expects (we have
      --symbol '-[HALS_IOA2UCDevice ...]'   # the method reading "output streams"/"data exchange blocks"
   (list CoreAudio IOA2 symbols: ./ipsw dyld symaddr ~/dsc/dyld_shared_cache_arm64 --image CoreAudio | grep -i IOA2)
 Then the stream/data-exchange-block code can be written against the real layout. Needs the PC (dsc).
+
+### Bluetooth: WCN3990 over GENI HS-UART (feasible, substantial)
+Hardware (live.dts): bt_wcn3990 (compatible qca,wcn3990), a UART-attached BT controller with its own
+power rails (bt-vdd io/core/pa/xtal). BT HCI is over a GENI high-speed UART (qcom,msm-geni-serial-hs);
+BT-SCO audio is a separate SLIMbus path (btfmslim_codec on slim@62e40000). WiFi is the same combo via
+icnss@0x18800000. Bring-up = (1) a GENI UART driver in XNU (we only have GENI I2C so far), (2) WCN3990
+power-on sequence via the bt vregs, (3) QCA firmware download over the UART (crbtfw*.tlv rampatch +
+crnv*.bin nvm - NOT in our firmware dump; from a surya vendor.img), (4) bridge the QCA HCI to iOS's
+bluetoothd transport (iOS expects its own BT transport; cf. Bergamota docs/BT_IOS_TRANSPORT.md; HakiOS
+lists BT as not-working/help-wanted). More tractable than sensors/audio (self-contained UART+fw, no DSP)
+but the iOS transport bridge is the hard part. Parked behind GPU; recorded for later.
+
+### App Store: not achievable on this port
+The App Store app launches but cannot function: it needs device activation, an Apple ID and Apple's
+servers (itunesstored/appstored authenticating to Apple), none of which exist on an unactivated,
+non-Apple device. HakiOS/ios-sweet confirm "Cannot connect to App Store". Not a code problem we can
+solve; apps come in by other means (sideload/package manager), not the App Store.

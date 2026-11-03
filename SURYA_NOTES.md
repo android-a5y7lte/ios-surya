@@ -1116,6 +1116,31 @@ owner/exec bits, and registers it (uicache if present, else restart lsd+SpringBo
 sweetlsreset=1). `--list` / `--remove NAME`. Self-contained apps run; ones needing activation/iCloud/App Store
 fail at runtime. Not yet tested on the phone (needs PC+phone); registration fallbacks may need refining.
 
+### "Different stores" = jailbreak package managers (the right fit) (2026-11-03)
+Our port already IS a jailbreak environment (kernel runs unsigned code, AMFI grants platform-binary to the
+root FS). So the browsable "stores" that fit are the jailbreak package managers, not Apple's App Store.
+What fits vs not:
+  - FITS: Sileo (default iOS-16 GUI manager), Zebra, Cydia (older, UIKit). They install .deb packages from
+    APT repos (BigBoss, Chariz, Havoc, Procursus) on top of a bootstrap. All UIKit -> should render on our
+    software framebuffer even with no GPU (confirm; some use CoreAnimation that just falls back to SW).
+  - DOES NOT FIT: Apple App Store (device identity, covered above). AltStore/SideStore (need an Apple
+    Developer cert + a refresh daemon - that's for NON-jailbroken devices; pointless here and identity-bound).
+    TrollStore (abuses a CoreTrust signing bug on stock iOS - we don't need it, we already run unsigned).
+  - Standalone .ipa app sideloads still go through surya-installapp (no store needed).
+THE PATH (iOS 16 standard, matches Dopamine): a Procursus ROOTLESS bootstrap at /var/jb + Sileo.
+  Rootless (/var/jb jbroot) because the iOS-16 debs/managers are built for that layout; we could do rootful
+  but matching rootless means packages land where they expect. Steps (at the PC, over SSH):
+    1. fetch at the PC (network-allowlisted here blocks it): a Procursus rootless bootstrap tarball
+       (bootstrap-*.tar.zst from ProcursusTeam/Procursus or the Dopamine strap) + the Sileo/Zebra .deb.
+    2. `tools/surya-bootstrap.py BOOTSTRAP.tar.zst` - scp + extract to /var/jb, make the jbroot, run the
+       Procursus prep (prep_bootstrap.sh / postinsts for dpkg,apt,profile.d), uicache the manager app.
+    3. on the phone: open Sileo, add repos, install packages. apt/dpkg then manage everything.
+  Dependencies the bootstrap provides: dpkg, apt, bash, the /var/jb tree, launchd jobs. Caveats: the prep
+  postinsts assume a jailbreakd-ish environment - may need per-step tweaks on our port; and a manager that
+  insists on Metal could struggle until the GPU lands (most are fine on the SW framebuffer). Untested; the
+  tool does the mechanical parts and prints the manual prep commands so we can run them one at a time.
+Sources: ProcursusTeam/Procursus; Dopamine (opa334) uses Procursus rootless /var/jb + Sileo on iOS 15-16.
+
 ### App launch analysis from the test5 log (2026-11-03, surya-logs/test5.txt)
 Mined the captured boot/USB log (no phone needed) for why apps fail. Findings:
   - The system DOES reach a working SpringBoard: `exec backboardd` once (line 777) and `exec SpringBoard`

@@ -15,6 +15,12 @@ phone (test). Everything else is prepared in the repo already. After any reboot,
 - [ ] **surya-installapp** (sideload apps, no App Store). `tools/surya-installapp.py SOME.ipa` (or a .app),
       `--list`, `--remove NAME`. Try a small self-contained app first. Needs LaunchServices registration:
       if the icon does not appear, reboot once with sweetlsreset=1. Apps needing Apple online services won't run.
+- [ ] **Install a "store"** (jailbreak package manager). Fetch a Procursus rootless bootstrap tarball
+      (bootstrap-*.tar.zst from ProcursusTeam/Procursus or the Dopamine strap) + Sileo/Zebra .deb at the PC,
+      plus a static arm64 `tar` (iOS ships none). Then `tools/surya-bootstrap.py BOOTSTRAP.tar.zst --tar ./tar`
+      lays it down at /var/jb, runs the prep, and registers Sileo. Open Sileo -> add repos -> install.
+      Untested; prep may need per-step tweaks (the tool prints each remote command). Apple App Store /
+      AltStore / TrollStore do NOT apply here (see SURYA_NOTES '"Different stores"').
 - [ ] **surya-crashlog** (why an app won't open). Open the failing app on the phone, wait a few seconds, then
       `tools/surya-crashlog.py AppName` (e.g. `MobileSafari`, `Maps`). Prints the exception, termination reason
       and faulting-thread symbols from the newest .ips. Run with no argument to list all recent crashes.

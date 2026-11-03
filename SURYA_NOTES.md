@@ -1101,6 +1101,31 @@ STAGED PLAN:
     VRM enable command. Bigger; only if R2 shows we must.
 Once a rail can be turned on, camera C2b (sensor chip-id) and BT B3 (power WCN3990) both unlock.
 
+### PC test results 2026-11-03 (read via the persistent log ring, patch 0047)
+USB live-log never worked on the owner's PC (our CDC-ECM gadget would not enumerate on USB-2 or USB-3;
+only the bootloader's 18d1:d00d shows, no cdc_ether). The GitHub macOS runners were also capacity-jammed
+("job was not acquired by Runner of type hosted"), so the sweetshow build (0104) could not build. WORKAROUND
+THAT WORKED and is now the reliable capture method on this PC: boot the already-green morning kernel
+(run 41599610410, patches through 0103) in variant 5 with the probe boot-args, let it reach the lock screen
+(so the ring flushes), then read the kernel console ring from userdata via recovery+adb
+(fastboot boot recovery/recovery.img; tools/sweet-log-pull.sh OUT.txt). USB logging is parked.
+RESULTS:
+  - C1 (camera, sweetcam=1): titan_top_gdsc 0xc1c4 = 0x0022f001 -> OFF (sw_collapse=1). cam_cc_pll0 and ALL
+    the cci/mclk CBCR/RCG registers read 0x00000000 -> the camera clock sub-block is unpowered at boot. (The
+    "(on)" the probe printed for the 0x0 CBCRs is misleading: 0x0 = block off, not enabled.) So the camera is
+    fully powered down at boot; C2a (power titan GDSC + cci clock) is required before any CCI use. C1 confirms
+    the probe + register map are correct and the log-ring capture works.
+  - R1 (regulators, sweetreg=1): EVERY rail (cam_vio pm6150_l13, cam_vana pm8009_l6, bt_io pm6150_l10,
+    bt_core pm6150l_l2, bt_pa pm6150l_l10, bt_xtal pm6150l_l1) returned "no SPMI response" - sweet_spmi_read
+    failed for all (init succeeded; the reads did not). Backlight WLED (pm6150l SID5) works over the same
+    sweet_spmi, so SPMI itself is up. Likely causes, to investigate: (a) sweet_spmi_read may need the OBS /
+    direct path rather than the APID/channel path for peripherals APPS does not "own"; (b) the LDO peripheral
+    base (0x4000+0x100*(n-1)) or SID may be wrong; (c) the LDOs are RPMh/AOP-owned and not APPS-accessible at
+    all - which would mean the direct-SPMI rail-enable shortcut is out and the RPMh path is required.
+    NEXT: read sweet_spmi_read's impl (OBS vs APID), re-check one LDO base against a known-good peripheral,
+    re-run R1; if still no response, the camera/BT rails need the RPMh path (bigger).
+NOT YET RUN (next session): G2 (sweetgpu=2), C2a (sweetcam=2) - same log-ring method.
+
 ### WiFi (WCN3990 via icnss): the largest subsystem - long-term, not near-term (2026-11-03)
 Honest feasibility note. WiFi is harder than Bluetooth and on par with / beyond the GPU. Not near-term.
 Hardware (live.dts): qcom,icnss@0x18800000 (membase 0x18800000 size 0x800000; ~12 copy-engine IRQs

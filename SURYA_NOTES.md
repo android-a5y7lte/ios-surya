@@ -967,3 +967,32 @@ Steps, each read back and logged "SWEET GPU: ...", aborts if CX GDSC does not re
 Nothing flashed; a reboot restores the boot loader's state. Test: boot sweetgpu=2, then
 `grep -a "SWEET GPU" logs/testNN.txt`. Expect cx_gdscr -> PWR_ON, gmu rcg updated, branches "on".
 Next (G3+): GPU SMMU context, then GMU firmware load + HFI (needs a618_gmu.bin), per the a6xx_gmu.c order.
+
+### G3-G5 reference map (verified from surya-dump/live.dts + Linux a6xx_gmu.c / a6xx_catalog.c)
+Prepared ahead of the G2 hardware result; the actual G3+ code waits until G2 is confirmed on the phone
+(if a write hangs, the hypervisor is blocking it and the approach changes).
+
+GMU (qcom,gmu@506a000):
+  kgsl_gmu_reg   0x0506a000 size 0x31000
+  kgsl_gmu_pdc_cfg 0x0b290000 size 0x10000   (SM7150-specific; SDM845 differs - do not copy Bergamota's)
+  kgsl_gmu_pdc_seq 0x0b490000 size 0x10000
+  RSCC = GMU + 0x23000 = 0x0508d000 (a6xx gen1 convention, confirm at G4)
+  IRQs: SPI 304 hfi_irq, SPI 305 gmu_irq. GMU clock 200 MHz (dt gmu-freq 0xbebc200) = our G2 RCG target.
+
+GPU SMMU (qcom,smmu-v2 @ 0x5040000, size 0x10000):
+  context banks at +0x8000 (smmu-v2), 2 global interrupts, qcom,disable-atos, 3-level tables.
+  Stream IDs (dt iommus = <&phandle 0x1cc SID>): gfx3d_user (CP) = 0, gfx3d_secure = 2,
+  gmu_user = 4, gmu_kernel = 5. (Matches HakiOS redwood / Bergamota SID map.)
+
+Zap shader: gpu_region@0x97715000 size 0x2000 (removed-dma-pool, no-map); TrustZone PAS id 13.
+
+Firmware (a618 = a6xx gen1; Linux a6xx_catalog.c a618 entry):
+  SQE (CP microcode): a630_sqe.fw   - generic, linux-firmware qcom/
+  GMU:                a630_gmu.bin   - generic, linux-firmware qcom/
+  zap:               a615_zap         - device-signed; ALREADY HAVE /home/claude/fw-surya/.../a615_zap.mbn
+    (combined .mbn; Linux wants split a615_zap.mdt + .bNN - split with pil-squasher reverse, or read the
+     .mbn directly in the loader). PAS id 13.
+  Delivery to the kernel: an ADT /sweet-gpu node via tools/mkadt.py, or a file on the iOS root - decide at G4.
+
+Order after G2: G3 GPU SMMU context (read-only dump first, then a context bank for the GMU SIDs 4/5);
+G4 GMU firmware into its TCM + boot + HFI handshake; G5 GX rail via the GMU (a6xx_gmu_gfx_rail_on, OOB).

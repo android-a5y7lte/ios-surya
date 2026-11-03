@@ -1,0 +1,144 @@
+diff --git a/iokit/Kernel/arm/SweetCamera.cpp b/iokit/Kernel/arm/SweetCamera.cpp
+new file mode 100644
+index 0000000..9a33d06
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetCamera.cpp
+@@ -0,0 +1,114 @@
++/*
++ * surya camera bring-up, step C1 (patch 0101): read-only look at the camera
++ * clock controller (camcc) + the two CCI (I2C) controllers. Plan and verified
++ * register map in SURYA_NOTES.md "Camera (surya)".
++ *
++ * Boot-arg sweetcam=1. Only reads, logged "SWEET CAM: ..." with printf (IOLog
++ * does not reach the message buffer the USB live log replays; cf. patch 0097):
++ *   CAMCC (0x0ad00000, camcc-sc7180/sdmmagpie offsets): PLL0, the titan_top
++ *     GDSC (0xc1c4 = DT gdsc@0xad0c1c4), the CCI0/CCI1 branch clocks and the
++ *     CCI0/MCLK0..4 clock sources. The camcc register file is always-on (like
++ *     gcc/gpucc), so these are safe to read whatever the camera power state is.
++ *   CCI0 (0x0ac4a000) / CCI1 (0x0ac4b000) HW_VERSION - only if the CCI branch
++ *     clock runs and the titan GDSC is on, since reading an unclocked block can
++ *     stall the bus (same guard shape as the GPU G1 AHB-clock check).
++ * Nothing is written; the camera stays as the boot loader left it.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <pexpert/pexpert.h>
++
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++class SweetCamera : public IOService {
++	OSDeclareDefaultStructors(SweetCamera);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetCamera, IOService);
++
++#define CAMCC_PA   0x0ad00000u
++#define CAMCC_SIZE 0x00010000u
++#define CCI0_PA    0x0ac4a000u
++#define CCI1_PA    0x0ac4b000u
++#define CCI_SIZE   0x00001000u
++
++#define CAMCC_PLL0           0x0000u
++#define CAMCC_MCLK0_CMD_RCGR 0x4004u
++#define CAMCC_MCLK1_CMD_RCGR 0x4024u
++#define CAMCC_MCLK2_CMD_RCGR 0x4044u
++#define CAMCC_MCLK3_CMD_RCGR 0x4064u
++#define CAMCC_MCLK4_CMD_RCGR 0x4084u
++#define CAMCC_CCI0_CMD_RCGR  0xb0d8u
++#define CAMCC_CCI0_CBCR      0xb0f0u
++#define CAMCC_CCI1_CBCR      0xb164u
++#define CAMCC_TITAN_GDSCR    0xc1c4u
++
++#define CCI_HW_VERSION       0x0000u
++
++static inline uint32_t
++rd(vm_offset_t base, uint32_t off)
++{
++	return *(volatile uint32_t *)(base + off);
++}
++
++static const struct {
++	const char *name;
++	uint32_t    off;
++} cbcr_regs[] = {
++	{ "cam_cc_cci_0_clk (cbcr)", CAMCC_CCI0_CBCR },
++	{ "cam_cc_cci_1_clk (cbcr)", CAMCC_CCI1_CBCR },
++}, rcg_regs[] = {
++	{ "cam_cc_cci_0_clk_src (cmd_rcgr)", CAMCC_CCI0_CMD_RCGR },
++	{ "cam_cc_mclk0_clk_src (cmd_rcgr)", CAMCC_MCLK0_CMD_RCGR },
++	{ "cam_cc_mclk1_clk_src (cmd_rcgr)", CAMCC_MCLK1_CMD_RCGR },
++	{ "cam_cc_mclk2_clk_src (cmd_rcgr)", CAMCC_MCLK2_CMD_RCGR },
++	{ "cam_cc_mclk3_clk_src (cmd_rcgr)", CAMCC_MCLK3_CMD_RCGR },
++	{ "cam_cc_mclk4_clk_src (cmd_rcgr)", CAMCC_MCLK4_CMD_RCGR },
++};
++
++bool
++SweetCamera::start(IOService *provider)
++{
++	int enabled = 0;
++	(void)PE_parse_boot_argn("sweetcam", &enabled, sizeof(enabled));
++	if (enabled < 1 || !IOService::start(provider)) {
++		return false;
++	}
++	printf("SWEET CAM: C1 read-only probe (camcc + CCI, surya)\n");
++
++	vm_offset_t cc = ml_io_map(CAMCC_PA, CAMCC_SIZE);
++
++	printf("SWEET CAM: cam_cc_pll0 (0x0000) = 0x%08x\n", rd(cc, CAMCC_PLL0));
++
++	uint32_t gdsc = rd(cc, CAMCC_TITAN_GDSCR);
++	printf("SWEET CAM: titan_top_gdsc (0xc1c4) = 0x%08x (%s, sw_collapse %u)\n",
++	    gdsc, (gdsc & 0x80000000u) ? "PWR_ON" : "off", gdsc & 0x1u);
++
++	for (unsigned i = 0; i < sizeof(cbcr_regs) / sizeof(cbcr_regs[0]); i++) {
++		uint32_t v = rd(cc, cbcr_regs[i].off);
++		printf("SWEET CAM: %s = 0x%08x%s\n", cbcr_regs[i].name, v,
++		    (v & 0x80000000u) ? " (off)" : " (on)");
++	}
++	for (unsigned i = 0; i < sizeof(rcg_regs) / sizeof(rcg_regs[0]); i++) {
++		uint32_t v = rd(cc, rcg_regs[i].off);
++		printf("SWEET CAM: %s = 0x%08x%s\n", rcg_regs[i].name, v,
++		    (v & 0x80000000u) ? " (root_off)" : " (root_on)");
++	}
++
++	bool cci0_on = !(rd(cc, CAMCC_CCI0_CBCR) & 0x80000000u);
++	bool titan_on = (rd(cc, CAMCC_TITAN_GDSCR) & 0x80000000u) != 0;
++	if (cci0_on && titan_on) {
++		vm_offset_t cci0 = ml_io_map(CCI0_PA, CCI_SIZE);
++		printf("SWEET CAM: cci0 hw_version (0xac4a000) = 0x%08x\n", rd(cci0, CCI_HW_VERSION));
++		vm_offset_t cci1 = ml_io_map(CCI1_PA, CCI_SIZE);
++		printf("SWEET CAM: cci1 hw_version (0xac4b000) = 0x%08x\n", rd(cci1, CCI_HW_VERSION));
++	} else {
++		printf("SWEET CAM: CCI clock/titan off (cci0_clk %s, titan %s), CCI regs not read\n",
++		    cci0_on ? "on" : "off", titan_on ? "on" : "off");
++	}
++	printf("SWEET CAM: C1 done\n");
++	return true;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index d844e41..c0ca101 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -102,3 +102,8 @@ const char * gIOKernelConfigTables =
+     "     'IOMatchCategory' = SweetGPU;"
+     "   },"
++    "   {"
++    "     'IOClass'         = SweetCamera;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetCamera;"
++    "   },"
+ #endif
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 77f9c69..c1ca101 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -22,5 +22,6 @@
+ iokit/Kernel/arm/SweetAudio2.cpp                                 optional iokitcpp
+ iokit/Kernel/arm/SweetAMFI.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/SweetGPU.cpp                                    optional iokitcpp
++iokit/Kernel/arm/SweetCamera.cpp                                 optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp

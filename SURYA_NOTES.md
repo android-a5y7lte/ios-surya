@@ -1118,6 +1118,11 @@ CCI PROGRAMMING MODEL (verified from mainline drivers/i2c/busses/i2c-qcom-cci.c)
 STAGED PLAN (mirrors GPU G-series; one verifiable step at a time):
   - C1 (read-only, no power change): map camcc 0xad00000, titan gdsc 0xad0c1c4, CCI0 0xac4a000, CCI1
     0xac4b000; dump HW_VERSION + GDSC/clock state. Pure observation, zero risk - same shape as GPU G1.
+    WRITTEN: patch 0101 (SweetCamera.cpp, boot-arg sweetcam=1, printf "SWEET CAM: ..."). Reads PLL0,
+    titan_top_gdsc (0xc1c4), cci_0/1 CBCR (0xb0f0/0xb164), cci_0 + mclk0..4 RCGs (0xb0d8, 0x4004..0x4084);
+    reads CCI0/CCI1 HW_VERSION only if cci_0_clk is on AND titan GDSC PWR_ON (bus-stall guard, like G1's AHB
+    check). camcc offsets from camcc-sc7180 (sibling of sdmmagpie); titan gdscr 0xc1c4 = DT abs 0xad0c1c4 -
+    base. Verified CCI offsets from mainline i2c-qcom-cci.c. Dry-run applies clean; not yet built/tested.
   - C2 ("it's alive"): enable camcc + titan_top GDSC + the CCI0 branch clock, drive MCLK + reset/standby
     GPIOs + regulators for sensor@0 (the IMX682), then a CCI read of chip-id reg 0x0016 -> expect 0x0682.
     Proves the apps CPU can talk to a camera sensor. Needs the IMX682 slave addr (TBD from vendor config).

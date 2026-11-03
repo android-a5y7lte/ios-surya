@@ -20,6 +20,15 @@ phone (test). Everything else is prepared in the repo already. After any reboot,
       and faulting-thread symbols from the newest .ips. Run with no argument to list all recent crashes.
       Paste the output back here; the per-app fix follows from what it shows. Reads only.
 
+## Camera (groundwork only - see SURYA_NOTES "Camera (surya)")
+- [ ] **Camera C1** (read-only probe, patch 0101). Build the xnu kernel with 0101, boot with `sweetcam=1`,
+      then `grep -a "SWEET CAM" logs/testNN.txt`. Expect camcc PLL0 / titan GDSC / CCI clock state; tells us
+      whether the camera clocks + titan power are already up at boot. Zero-risk (reads only, same as GPU G1).
+      Paste the SWEET CAM lines back. NOTE: camera is the hardest subsystem (ISP + an iOS capture provider) -
+      C1/C2 only prove we can talk to a sensor; a live preview is far off. Details + staged plan in SURYA_NOTES.
+- [ ] **Before C2**: get the IMX682 (+ other sensors') I2C slave address + sensor-id register from a surya
+      vendor image (camxoverridesettings / sensor module libs) or datasheet. Needed to read a chip-id over CCI.
+
 ## Needs the PC's dyld cache (~/dsc) - disassembly, no phone needed
 - [ ] **Audio next step**: extract the IOAudio2 "data exchange blocks" / "output streams" binary layout
       (commands in SURYA_NOTES.md "Audio next step"). Paste output back; then the stream code can be written.

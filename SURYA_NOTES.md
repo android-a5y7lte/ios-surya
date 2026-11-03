@@ -1044,3 +1044,12 @@ The App Store app launches but cannot function: it needs device activation, an A
 servers (itunesstored/appstored authenticating to Apple), none of which exist on an unactivated,
 non-Apple device. HakiOS/ios-sweet confirm "Cannot connect to App Store". Not a code problem we can
 solve; apps come in by other means (sideload/package manager), not the App Store.
+
+### Sideloading apps (instead of the App Store): surya-installapp
+App Store can't work (needs Apple activation + device identity this phone can't present; account would just
+get flagged). But apps don't need it here: the kernel runs unsigned code (AMFI grants platform-binary to the
+root FS), so an app is its .app bundle in /Applications, registered with LaunchServices - the jailbreak route.
+`tools/surya-installapp.py APP|IPA` unpacks an .ipa on the PC, scp's the bundle to /Applications, fixes
+owner/exec bits, and registers it (uicache if present, else restart lsd+SpringBoard, else reboot with
+sweetlsreset=1). `--list` / `--remove NAME`. Self-contained apps run; ones needing activation/iCloud/App Store
+fail at runtime. Not yet tested on the phone (needs PC+phone); registration fallbacks may need refining.

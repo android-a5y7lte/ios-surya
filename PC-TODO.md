@@ -12,6 +12,9 @@ phone (test). Everything else is prepared in the repo already. After any reboot,
 - [ ] **suryablur** (white App Library / folders fix, no GPU). `scp tools/suryablur/suryablur
       root@192.168.7.2:/var/root/bin/`, then `ssh root@192.168.7.2 '/var/root/bin/suryablur 1'`, respring
       (kill SpringBoard). Photo before/after. `suryablur 0` reverts. Check if it helps Safari too.
+- [ ] **surya-installapp** (sideload apps, no App Store). `tools/surya-installapp.py SOME.ipa` (or a .app),
+      `--list`, `--remove NAME`. Try a small self-contained app first. Needs LaunchServices registration:
+      if the icon does not appear, reboot once with sweetlsreset=1. Apps needing Apple online services won't run.
 
 ## Needs the PC's dyld cache (~/dsc) - disassembly, no phone needed
 - [ ] **Audio next step**: extract the IOAudio2 "data exchange blocks" / "output streams" binary layout

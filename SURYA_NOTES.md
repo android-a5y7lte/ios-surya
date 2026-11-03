@@ -1053,3 +1053,78 @@ root FS), so an app is its .app bundle in /Applications, registered with LaunchS
 owner/exec bits, and registers it (uicache if present, else restart lsd+SpringBoard, else reboot with
 sweetlsreset=1). `--list` / `--remove NAME`. Self-contained apps run; ones needing activation/iCloud/App Store
 fail at runtime. Not yet tested on the phone (needs PC+phone); registration fallbacks may need refining.
+
+### Why an app won't open: surya-crashlog (2026-11-03)
+`tools/surya-crashlog.py [NAME] [-n N]` pulls an app's newest .ips crash report from
+/var/mobile/Library/Logs/CrashReporter/ over SSH and decodes it (exception, termination reason,
+faulting-thread frames resolved to image+symbol, lastExceptionBacktrace) - the read we did by hand for
+PosterBoard. No arg = list recent crashes. Reads only. Use it to sort failing apps into buckets:
+(a) needs Metal/GPU (dies in AGXMetal/IOGPU/MTLDevice/CoreAnimation) -> blocked on GPU, no app fix;
+(b) missing/crashed daemon (lost XPC to mediaserverd etc.) -> start/stub it; (c) missing dylib
+(dyld "Library not loaded" in termination) -> copy it into the root; (d) first-run assertion
+(NSInternalInconsistencyException/abort on launch, like PosterBoard) -> defaults write or small patch.
+The per-app fix follows from what the report shows, so this is the prerequisite, not the fix. Needs PC+phone.
+
+### Camera (surya): the hardest subsystem - groundwork only (2026-11-03)
+HONEST CEILING FIRST. A working camera is further off than the GPU, for two stacked reasons:
+  1. The sensors are the easy part. The real work is Qualcomm's **Spectra / Titan ISP** (CSIPHY -> CSID ->
+     IFE/VFE -> IPE/BPS -> ICP), a large opaque pipeline that needs its own firmware (ICP a5xx fw) and a
+     CDM command-buffer driver. That is the whole camss subsystem, comparable in size to the audio ADSP.
+  2. iOS has NO driver that can talk to any of it. `AppleCamera`/`AppleH*ISP` target Apple's own ISP over
+     Apple IOKit. To surface frames to AVFoundation we'd have to write a capture provider from scratch
+     (a CoreMediaIO/IOKit source feeding AVCaptureSession) on top of a from-scratch Spectra driver.
+So a live preview is a multi-month effort, not a near-term milestone. What IS tractable and PC-free to
+prepare now is the hardware map + the one verifiable first step: talk to a sensor over CCI and read its
+chip-ID (analogous to GPU G1/G2 - "it's alive" before anything renders).
+
+VERIFIED HARDWARE MAP (from surya-dump/live.dts):
+  - camcc (camera clock controller): base 0xad00000 size 0x10000, compat "qcom,camcc-sdmmagpie",
+    vdd_cx + vdd_mx. phandle 0x29. (Same family as gpucc; register style matches the GPU clock work.)
+  - titan_top_gdsc: /soc/qcom,gdsc@ad0c1c4 (power domain for the whole ISP/Titan block).
+  - CCI0 (I2C): 0xac4a000 size 0x1000, IRQ GIC-SPI 460 (0x1cc), 2 masters (DATA0/CLK0, DATA1/CLK1),
+    clock cci_0_clk_src 0x23c3460 Hz (~37.5 MHz). CCI1: 0xac4b000, IRQ SPI 461 (0x1cd), master2.
+    CCI is just a dedicated Qualcomm I2C master block - this is the part we can drive without the ISP.
+  - CSIPHY x4: 0xace0000, 0xace2000, 0xace4000, 0xace6000 (MIPI D-PHY; needed for frames, not for CCI).
+  - CPAS-CDM0: 0xac48000 (cam170-cpas-cdm0, the command-DMA front end; client "ife").
+  - ICP firmware node msm_cam_icp_fw + cpas client list: csiphy0-3, cci0-1, csid0-2, ife rdi/nrdi 0-2,
+    ipe0-1, bps0, icp0, jpeg-dma/enc, fd0, lrme - i.e. the full Spectra pipeline is present in DT.
+  - 7 cam-sensor nodes (cci@ac4a000 has @0..@6; cci@ac4b000 is the 2nd controller). Per node DT gives:
+    csiphy-sd-index, cci-master, cci-device, MCLK (camcc clk id), reset/standby GPIOs on TLMM (phandle
+    0x17b), and regulators (cam_vio ~1.8V, cam_vana ~2.8V, cam_vdig ~1.05-1.2V, cam_vaf for the actuator).
+    NOTE: the DT does NOT carry each sensor's I2C slave address or sensor-id register - those live in the
+    vendor camera config (camxoverridesettings / sensor module libs), not in the kernel DT. Must be pulled
+    from a surya vendor image or a sensor datasheet before C2.
+  - Sensors by role (public POCO X3 NFC spec; only the main is named in the open device tree):
+    main/wide 64MP = Sony IMX682 (chip-id reg 0x0016, id 0x0682, 16-bit addr - standard Sony); ultrawide
+    13MP, macro 2MP, depth 2MP, front 20MP = models not in the open tree (TBD from vendor config).
+
+CCI PROGRAMMING MODEL (verified from mainline drivers/i2c/busses/i2c-qcom-cci.c):
+  regs: CCI_HW_VERSION 0x00; CCI_RESET_CMD 0x04 (mask 0x0f73f3f7); CCI_QUEUE_START 0x08; CCI_HALT_REQ 0x34
+    (M0 BIT0, M1 BIT1); IRQ block at 0xc00: GLOBAL_CLEAR_CMD 0xc00, MASK_0 0xc04, CLEAR_0 0xc08, STATUS_0 0xc0c.
+  per-master (m): SCL_CTL 0x100+0x100*m, SDA_CTL_0/1/2 0x104/0x108/0x10c+0x100*m, MISC_CTL 0x110+0x100*m,
+    READ_DATA 0x118+0x100*m, READ_BUF_LEVEL 0x11c+0x100*m.
+  per-master/queue (m,n): EXEC_WORD_CNT 0x300+0x200*m+0x100*n, CUR_WORD_CNT 0x304+.., CUR_CMD 0x308+..,
+    REPORT_STATUS 0x30c+.., LOAD_DATA 0x310+0x200*m+0x100*n.
+  IRQ bits: M0 RD_DONE bit0, M0 Q0/Q1 REPORT bit4/bit8; M1 RD_DONE bit12, REPORT bit16/bit20; RST_DONE bit24.
+  queue opcodes: SET_PARAM 1, REPORT 8, WRITE 9, READ 10.
+  read N bytes from sensor reg (combined write-addr then read):
+    Q0: LOAD_DATA SET_PARAM|(slave<<4); LOAD_DATA WRITE|(len<<4) + reg-addr bytes (4/word, LE);
+        LOAD_DATA REPORT|REPORT_IRQ_EN; set EXEC_WORD_CNT=CUR_WORD_CNT; QUEUE_START BIT(m*2+0).
+    Q1: LOAD_DATA SET_PARAM|(slave<<4); LOAD_DATA READ|(N<<4); EXEC_WORD_CNT=CUR_WORD_CNT; QUEUE_START BIT(m*2+1);
+        poll READ_BUF_LEVEL (expect N/4+1 words); read READ_DATA, discard the first byte, take N bytes.
+  (Downstream "qcom,cci" is the same HW; use these mainline-verified offsets. Needs camcc gate + titan GDSC
+   + the CCI branch clock on before any of this; the clock IDs are in camcc, same approach as the GPU clocks.)
+
+STAGED PLAN (mirrors GPU G-series; one verifiable step at a time):
+  - C1 (read-only, no power change): map camcc 0xad00000, titan gdsc 0xad0c1c4, CCI0 0xac4a000, CCI1
+    0xac4b000; dump HW_VERSION + GDSC/clock state. Pure observation, zero risk - same shape as GPU G1.
+  - C2 ("it's alive"): enable camcc + titan_top GDSC + the CCI0 branch clock, drive MCLK + reset/standby
+    GPIOs + regulators for sensor@0 (the IMX682), then a CCI read of chip-id reg 0x0016 -> expect 0x0682.
+    Proves the apps CPU can talk to a camera sensor. Needs the IMX682 slave addr (TBD from vendor config).
+    This is the real near-term goal; everything past it produces no picture yet.
+  - C3+ (frames): CSIPHY lane bring-up -> CSID -> IFE RDI path to DMA raw Bayer into memory. Large.
+  - C4+ (processed): ICP firmware load + IPE/BPS via CPAS-CDM for YUV. Very large + needs ICP fw blob.
+  - C5+ (iOS): a CoreMediaIO/IOKit capture provider so AVFoundation/Camera.app sees it. From scratch.
+BLOCKED-ON / TO FETCH (no phone needed except where noted): IMX682 (+ other sensors') I2C slave addr and
+  sensor-id reg - from a surya vendor image or datasheet; ICP firmware (for C4) - from vendor image.
+Sources: mainline i2c-qcom-cci.c (grok.openbmc.org mirror); surya-dump/live.dts; POCO X3 NFC public camera spec.

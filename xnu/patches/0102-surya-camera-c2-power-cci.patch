@@ -1,0 +1,164 @@
+diff --git a/iokit/Kernel/arm/SweetCamera.cpp b/iokit/Kernel/arm/SweetCamera.cpp
+index 9a33d06..07d9bd4 100644
+--- a/iokit/Kernel/arm/SweetCamera.cpp
++++ b/iokit/Kernel/arm/SweetCamera.cpp
+@@ -1,18 +1,24 @@
+ /*
+- * surya camera bring-up, step C1 (patch 0101): read-only look at the camera
+- * clock controller (camcc) + the two CCI (I2C) controllers. Plan and verified
+- * register map in SURYA_NOTES.md "Camera (surya)".
++ * surya camera bring-up, steps C1 (patch 0101) + C2 (patch 0102): the camera
++ * clock controller (camcc), the titan power domain, and the CCI (I2C) block.
++ * Plan and verified register map in SURYA_NOTES.md "Camera (surya)".
+  *
+- * Boot-arg sweetcam=1. Only reads, logged "SWEET CAM: ..." with printf (IOLog
+- * does not reach the message buffer the USB live log replays; cf. patch 0097):
+- *   CAMCC (0x0ad00000, camcc-sc7180/sdmmagpie offsets): PLL0, the titan_top
+- *     GDSC (0xc1c4 = DT gdsc@0xad0c1c4), the CCI0/CCI1 branch clocks and the
+- *     CCI0/MCLK0..4 clock sources. The camcc register file is always-on (like
+- *     gcc/gpucc), so these are safe to read whatever the camera power state is.
+- *   CCI0 (0x0ac4a000) / CCI1 (0x0ac4b000) HW_VERSION - only if the CCI branch
+- *     clock runs and the titan GDSC is on, since reading an unclocked block can
+- *     stall the bus (same guard shape as the GPU G1 AHB-clock check).
+- * Nothing is written; the camera stays as the boot loader left it.
++ * Boot-arg sweetcam:
++ *   =1  C1, read-only: dump camcc PLL0, the titan_top GDSC (0xc1c4 = DT
++ *       gdsc@0xad0c1c4), the CCI0/CCI1 branch clocks and the CCI0/MCLK0..4
++ *       clock sources. CCI0/CCI1 HW_VERSION only if the CCI clock is already
++ *       running and the titan GDSC is on (bus-stall guard). Writes nothing.
++ *   >=2 C2, powers the CCI *controller*: bring the titan GDSC up (clear
++ *       SW_COLLAPSE, like the GPU CX GDSC in G2) and enable the CCI0 branch
++ *       clock, reset CCI, then read HW_VERSION with the block actually powered.
++ *       This is a bounded, verifiable milestone (power + reach the CCI block).
++ *       It does NOT read a sensor's chip-id yet: the sensor rails (cam_vio/
++ *       cam_vdig) are PMIC LDOs we cannot drive until the regulator path
++ *       exists (SURYA_NOTES "Cross-cutting blocker"). The verified sensor read
++ *       (slave 0x1A, reg 0x0016, expect 0x0682) is recorded there for then.
++ * Logged "SWEET CAM: ..." with printf (IOLog does not reach the USB live log;
++ * cf. patch 0097). The camcc register file is always-on, so the C1 reads are
++ * safe whatever the power state; C2 writes only on-die camcc/CCI registers.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <IOKit/IOService.h>
+@@ -46,6 +52,12 @@ OSDefineMetaClassAndStructors(SweetCamera, IOService);
+ #define CAMCC_TITAN_GDSCR    0xc1c4u
+ 
+ #define CCI_HW_VERSION       0x0000u
++#define CCI_RESET_CMD        0x0004u
++#define CCI_RESET_MASK       0x0f73f3f7u
++
++#define BRANCH_ON            0x80000000u /* CBCR BIT(31): 1 = clock off */
++#define GDSC_PWR_ON          0x80000000u /* GDSCR BIT(31) */
++#define GDSC_SW_COLLAPSE     0x00000001u
+ 
+ static inline uint32_t
+ rd(vm_offset_t base, uint32_t off)
+@@ -53,6 +65,43 @@ rd(vm_offset_t base, uint32_t off)
+ 	return *(volatile uint32_t *)(base + off);
+ }
+ 
++static inline void
++wr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++/* poll until (read & mask) == want, up to ~5 ms; returns the match and the
++ * last value read. */
++static bool
++poll(vm_offset_t base, uint32_t off, uint32_t mask, uint32_t want, uint32_t *out)
++{
++	uint32_t v = 0;
++	for (int i = 0; i < 500; i++) {
++		v = rd(base, off);
++		if ((v & mask) == want) {
++			if (out) { *out = v; }
++			return true;
++		}
++		IODelay(10);
++	}
++	if (out) { *out = v; }
++	return false;
++}
++
++/* Enable a clock branch (CBCR): set BIT(0), wait for BIT(31) to clear. */
++static bool
++branch_on(vm_offset_t cc, const char *name, uint32_t cbcr)
++{
++	uint32_t before = rd(cc, cbcr), after = 0;
++	wr(cc, cbcr, before | 0x1u);
++	bool on = poll(cc, cbcr, BRANCH_ON, 0, &after);
++	printf("SWEET CAM: branch %s 0x%08x -> 0x%08x (%s)\n", name, before, after,
++	    on ? "on" : "still off");
++	return on;
++}
++
+ static const struct {
+ 	const char *name;
+ 	uint32_t    off;
+@@ -84,12 +133,12 @@ SweetCamera::start(IOService *provider)
+ 
+ 	uint32_t gdsc = rd(cc, CAMCC_TITAN_GDSCR);
+ 	printf("SWEET CAM: titan_top_gdsc (0xc1c4) = 0x%08x (%s, sw_collapse %u)\n",
+-	    gdsc, (gdsc & 0x80000000u) ? "PWR_ON" : "off", gdsc & 0x1u);
++	    gdsc, (gdsc & GDSC_PWR_ON) ? "PWR_ON" : "off", gdsc & GDSC_SW_COLLAPSE);
+ 
+ 	for (unsigned i = 0; i < sizeof(cbcr_regs) / sizeof(cbcr_regs[0]); i++) {
+ 		uint32_t v = rd(cc, cbcr_regs[i].off);
+ 		printf("SWEET CAM: %s = 0x%08x%s\n", cbcr_regs[i].name, v,
+-		    (v & 0x80000000u) ? " (off)" : " (on)");
++		    (v & BRANCH_ON) ? " (off)" : " (on)");
+ 	}
+ 	for (unsigned i = 0; i < sizeof(rcg_regs) / sizeof(rcg_regs[0]); i++) {
+ 		uint32_t v = rd(cc, rcg_regs[i].off);
+@@ -97,8 +146,8 @@ SweetCamera::start(IOService *provider)
+ 		    (v & 0x80000000u) ? " (root_off)" : " (root_on)");
+ 	}
+ 
+-	bool cci0_on = !(rd(cc, CAMCC_CCI0_CBCR) & 0x80000000u);
+-	bool titan_on = (rd(cc, CAMCC_TITAN_GDSCR) & 0x80000000u) != 0;
++	bool cci0_on = !(rd(cc, CAMCC_CCI0_CBCR) & BRANCH_ON);
++	bool titan_on = (rd(cc, CAMCC_TITAN_GDSCR) & GDSC_PWR_ON) != 0;
+ 	if (cci0_on && titan_on) {
+ 		vm_offset_t cci0 = ml_io_map(CCI0_PA, CCI_SIZE);
+ 		printf("SWEET CAM: cci0 hw_version (0xac4a000) = 0x%08x\n", rd(cci0, CCI_HW_VERSION));
+@@ -109,6 +158,38 @@ SweetCamera::start(IOService *provider)
+ 		    cci0_on ? "on" : "off", titan_on ? "on" : "off");
+ 	}
+ 	printf("SWEET CAM: C1 done\n");
++
++	if (enabled < 2) {
++		return true;
++	}
++
++	/* C2: power the CCI controller (on-die: titan GDSC + CCI0 branch clock),
++	 * reset it, and read HW_VERSION with the block actually powered. Does not
++	 * touch the sensor rails (PMIC) - no sensor chip-id read yet. */
++	printf("SWEET CAM: C2 - powering the CCI0 controller (titan GDSC + cci_0_clk)\n");
++
++	uint32_t g0 = rd(cc, CAMCC_TITAN_GDSCR), g1 = 0;
++	wr(cc, CAMCC_TITAN_GDSCR, g0 & ~GDSC_SW_COLLAPSE);
++	bool ton = poll(cc, CAMCC_TITAN_GDSCR, GDSC_PWR_ON, GDSC_PWR_ON, &g1);
++	printf("SWEET CAM: titan gdsc 0x%08x -> 0x%08x (%s)\n", g0, g1, ton ? "PWR_ON" : "still off");
++	if (!ton) {
++		printf("SWEET CAM: titan did not power, abort C2 (safe)\n");
++		return true;
++	}
++
++	bool cci_on = branch_on(cc, "cam_cc_cci_0_clk", CAMCC_CCI0_CBCR);
++	if (!cci_on) {
++		printf("SWEET CAM: cci_0_clk stayed off (RCG root off? see C1), abort C2 (safe)\n");
++		return true;
++	}
++
++	vm_offset_t cci = ml_io_map(CCI0_PA, CCI_SIZE);
++	printf("SWEET CAM: cci0 hw_version (before reset) = 0x%08x\n", rd(cci, CCI_HW_VERSION));
++	wr(cci, CCI_RESET_CMD, CCI_RESET_MASK);
++	IODelay(100);
++	printf("SWEET CAM: cci0 hw_version (after reset)  = 0x%08x\n", rd(cci, CCI_HW_VERSION));
++	printf("SWEET CAM: C2 done - CCI0 controller reachable. Sensor chip-id read "
++	    "(slave 0x1a, reg 0x0016, expect 0x0682) waits on sensor-rail regulators.\n");
+ 	return true;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

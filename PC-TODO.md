@@ -26,8 +26,13 @@ phone (test). Everything else is prepared in the repo already. After any reboot,
       whether the camera clocks + titan power are already up at boot. Zero-risk (reads only, same as GPU G1).
       Paste the SWEET CAM lines back. NOTE: camera is the hardest subsystem (ISP + an iOS capture provider) -
       C1/C2 only prove we can talk to a sensor; a live preview is far off. Details + staged plan in SURYA_NOTES.
-- [ ] **Before C2**: get the IMX682 (+ other sensors') I2C slave address + sensor-id register from a surya
-      vendor image (camxoverridesettings / sensor module libs) or datasheet. Needed to read a chip-id over CCI.
+- [ ] **Camera C2a** (power the CCI controller, patch 0102). After C1, boot with `sweetcam=2` and
+      `grep -a "SWEET CAM" logs/testNN.txt`. Expect: titan gdsc -> PWR_ON, cci_0_clk branch on, and a sane
+      cci0 HW_VERSION after reset. Writes on-die camcc/CCI registers only (no PMIC); aborts safely if titan
+      won't power or the CCI RCG root is off. If it hangs/resets, grab the SWEET CAM lines + Power+VolDown.
+- [ ] **Camera C2b** (blocked): read the IMX682 chip-id over CCI (slave 0x1a, reg 0x0016, expect 0x0682).
+      Needs a sensor rail turned on (PMIC/regulator path - the cross-cutting blocker) + MCLK + reset GPIO.
+      Also confirm the IMX682 slave addr from a surya vendor image (camxoverridesettings / sensor libs).
 
 ## Needs the PC's dyld cache (~/dsc) - disassembly, no phone needed
 - [ ] **Audio next step**: extract the IOAudio2 "data exchange blocks" / "output streams" binary layout

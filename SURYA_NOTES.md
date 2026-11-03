@@ -1165,10 +1165,20 @@ STAGED PLAN (mirrors GPU G-series; one verifiable step at a time):
     reads CCI0/CCI1 HW_VERSION only if cci_0_clk is on AND titan GDSC PWR_ON (bus-stall guard, like G1's AHB
     check). camcc offsets from camcc-sc7180 (sibling of sdmmagpie); titan gdscr 0xc1c4 = DT abs 0xad0c1c4 -
     base. Verified CCI offsets from mainline i2c-qcom-cci.c. Dry-run applies clean; not yet built/tested.
-  - C2 ("it's alive"): enable camcc + titan_top GDSC + the CCI0 branch clock, drive MCLK + reset/standby
-    GPIOs + regulators for sensor@0 (the IMX682), then a CCI read of chip-id reg 0x0016 -> expect 0x0682.
-    Proves the apps CPU can talk to a camera sensor. Needs the IMX682 slave addr (TBD from vendor config).
-    This is the real near-term goal; everything past it produces no picture yet.
+  - C2 ("it's alive", split in two): the full sensor-id read needs the sensor rails (cam_vio/cam_vdig =
+    PMIC LDOs - blocked, see cross-cutting note) + MCLK + reset-GPIO deassert, so it is split:
+    * C2a (WRITTEN, patch 0102, boot-arg sweetcam=2): power the CCI *controller* only - bring the titan
+      GDSC up (clear SW_COLLAPSE, poll PWR_ON, exactly like the GPU CX GDSC in G2), enable the cci_0_clk
+      branch, reset CCI, read HW_VERSION with the block powered. On-die only, no PMIC. Bounded/verifiable:
+      a sane HW_VERSION = we can power and reach CCI. Guards: aborts safely if titan won't power or the
+      CCI RCG root is off (C1 shows the RCG state). Dry-run applies on top of 0101; not yet built/tested.
+    * C2b (blocked on regulators): once a rail can be turned on, add MCLK0 enable + reset-GPIO deassert +
+      the CCI I2C read. VERIFIED read recipe for sensor@0 (IMX682, cci-master 0):
+        slave 0x1A (7-bit; Sony main-sensor addr, confirm vs vendor config), reg 0x0016 (16-bit addr),
+        read 2 bytes, expect 0x0682 (same family as IMX412/IMX577 whose driver reads 0x0016).
+        CCI queue (mainline i2c-qcom-cci.c): set i2c timing (DT i2c_fast_mode) first; Q0 SET_PARAM|(0x1A<<4),
+        WRITE|(2<<4)+{0x00,0x16}, REPORT; run (QUEUE_START BIT(0)); Q1 SET_PARAM|(0x1A<<4), READ|(2<<4);
+        run (QUEUE_START BIT(1)); READ_BUF_LEVEL then READ_DATA, discard first byte, take 2.
   - C3+ (frames): CSIPHY lane bring-up -> CSID -> IFE RDI path to DMA raw Bayer into memory. Large.
   - C4+ (processed): ICP firmware load + IPE/BPS via CPAS-CDM for YUV. Very large + needs ICP fw blob.
   - C5+ (iOS): a CoreMediaIO/IOKit capture provider so AVFoundation/Camera.app sees it. From scratch.

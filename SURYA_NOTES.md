@@ -1116,6 +1116,26 @@ owner/exec bits, and registers it (uicache if present, else restart lsd+SpringBo
 sweetlsreset=1). `--list` / `--remove NAME`. Self-contained apps run; ones needing activation/iCloud/App Store
 fail at runtime. Not yet tested on the phone (needs PC+phone); registration fallbacks may need refining.
 
+### App launch analysis from the test5 log (2026-11-03, surya-logs/test5.txt)
+Mined the captured boot/USB log (no phone needed) for why apps fail. Findings:
+  - The system DOES reach a working SpringBoard: `exec backboardd` once (line 777) and `exec SpringBoard`
+    once - no crash loop - keys work (SWEET KEYS/HID), and "SWEET FB: 6000 swaps" = the UI is rendering
+    through the SOFTWARE framebuffer. So basic UI/wallpaper/widgets work (matches test14) with no GPU.
+  - DOMINANT app blocker = no GPU: backboardd's `IOProviderClass=AGXAccelerator ... -> none` (lines 1553,
+    1559) - there is no Metal device. backboardd also threw a (non-fatal, it kept running) memory exception
+    with a long backtrace (lines ~1818-1831), almost certainly the same GPU/CA path. => graphics/Metal apps
+    (Camera, Maps, games, anything Metal-backed) cannot open until the GPU work lands. This is one root
+    cause, not many per-app bugs.
+  - Non-GPU daemons launch fine: bluetoothd, mediaanalysisd, fairplayd.H2, IMDMessageServicesAgent, maild,
+    accountsd, searchd, softwareupdateservicesd all `exec`. (bluetoothd starts but can't reach the chip - BT
+    plan separate.)
+  - Benign noise (not app blockers): dyld_shared_cache "not in trust cache" (expected, our kernel allows
+    unsigned), missing keybags/persona.kb, tzinfo symlink reset, Jetsam high-watermark opt-in fail.
+  - To symbolicate backboardd's fault later (needs the PC's dsc): the fault PCs/bt are at test5.txt ~1818;
+    run them through `ipsw dyld a2s ~/dsc/dyld_shared_cache_arm64 <addr>`.
+CONCLUSION: the highest-leverage fix for "apps that won't open" is the GPU bring-up we're already doing;
+the per-app stragglers (non-Metal) are caught individually with surya-crashlog.py once at the PC.
+
 ### Why an app won't open: surya-crashlog (2026-11-03)
 `tools/surya-crashlog.py [NAME] [-n N]` pulls an app's newest .ips crash report from
 /var/mobile/Library/Logs/CrashReporter/ over SSH and decodes it (exception, termination reason,

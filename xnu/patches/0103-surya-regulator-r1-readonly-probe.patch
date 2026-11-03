@@ -1,0 +1,118 @@
+diff --git a/iokit/Kernel/arm/SweetRegulator.cpp b/iokit/Kernel/arm/SweetRegulator.cpp
+new file mode 100644
+index 0000000..595733f
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetRegulator.cpp
+@@ -0,0 +1,89 @@
++/*
++ * surya regulator bring-up, step R1 (patch 0103): read-only look at the PMIC
++ * LDOs that feed the camera and Bluetooth rails, over the SPMI path we already
++ * have (sweet_spmi.c, patch 0083). Plan in SURYA_NOTES.md "Cross-cutting
++ * blocker: regulator / PMIC control".
++ *
++ * Boot-arg sweetreg=1. Only reads, logged "SWEET REG: ...". For each rail's LDO
++ * it reads, at the LDO's SPMI peripheral base (pmic5 LDO base = 0x4000 +
++ * 0x100*(n-1)): TYPE (+0x04; 0x04 = LDO, 0x21 = ULT_LDO - confirms we hit the
++ * peripheral), ENABLE (+0x46; bit 0x80 = on), VOLTAGE_RANGE (+0x40) and
++ * VOLTAGE_SET (+0x41). Reg offsets/bits from the Linux qcom_spmi-regulator.c.
++ * This tells us which rails the boot loader already left on, and whether the
++ * apps CPU can even reach them. Writing a rail on (R2) comes later and will
++ * report via sweet_spmi_write()'s own APPS-ownership check.
++ *
++ * Rail -> LDO map (from surya-dump/live.dts): SIDs pm6150=0, pm6150l=4,
++ * pm8009=0xa (all confirmed on qcom,spmi@c440000).
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <pexpert/pexpert.h>
++
++extern "C" int sweet_spmi_init(void);
++extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++
++class SweetRegulator : public IOService {
++	OSDeclareDefaultStructors(SweetRegulator);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetRegulator, IOService);
++
++#define LDO_BASE(n)   (0x4000u + 0x100u * ((n) - 1u))
++#define REG_TYPE      0x04u
++#define REG_VRANGE    0x40u
++#define REG_VSET      0x41u
++#define REG_ENABLE    0x46u
++#define ENABLE_ON     0x80u
++
++static const struct {
++	const char *rail;   /* what it powers */
++	const char *ldo;    /* PMIC LDO name */
++	unsigned    sid;
++	unsigned    n;      /* LDO number */
++} rails[] = {
++	{ "cam_vio",     "pm6150_l13",  0x0, 13 },
++	{ "cam_vana",    "pm8009_l6",   0xa,  6 },
++	{ "bt_vdd_io",   "pm6150_l10",  0x0, 10 },
++	{ "bt_vdd_core", "pm6150l_l2",  0x4,  2 },
++	{ "bt_vdd_pa",   "pm6150l_l10", 0x4, 10 },
++	{ "bt_vdd_xtal", "pm6150l_l1",  0x4,  1 },
++};
++
++bool
++SweetRegulator::start(IOService *provider)
++{
++	int enabled = 0;
++	(void)PE_parse_boot_argn("sweetreg", &enabled, sizeof(enabled));
++	if (enabled < 1 || !IOService::start(provider)) {
++		return false;
++	}
++	if (sweet_spmi_init() != 0) {
++		printf("SWEET REG: SPMI init failed, cannot probe rails\n");
++		return true;
++	}
++	printf("SWEET REG: R1 read-only PMIC LDO probe (camera + Bluetooth rails)\n");
++
++	for (unsigned i = 0; i < sizeof(rails) / sizeof(rails[0]); i++) {
++		unsigned base = LDO_BASE(rails[i].n);
++		uint8_t type = 0, en = 0, vr = 0, vs = 0;
++		int rt = sweet_spmi_read(rails[i].sid, base + REG_TYPE, &type);
++		int re = sweet_spmi_read(rails[i].sid, base + REG_ENABLE, &en);
++		(void)sweet_spmi_read(rails[i].sid, base + REG_VRANGE, &vr);
++		(void)sweet_spmi_read(rails[i].sid, base + REG_VSET, &vs);
++		if (rt != 0 || re != 0) {
++			printf("SWEET REG: %-12s %s (sid %u base 0x%04x): no SPMI response\n",
++			    rails[i].rail, rails[i].ldo, rails[i].sid, base);
++			continue;
++		}
++		printf("SWEET REG: %-12s %s (sid %u base 0x%04x): type 0x%02x enable 0x%02x (%s) "
++		    "vrange 0x%02x vset 0x%02x\n",
++		    rails[i].rail, rails[i].ldo, rails[i].sid, base,
++		    type, en, (en & ENABLE_ON) ? "ON" : "off", vr, vs);
++	}
++	printf("SWEET REG: R1 done (type 0x04=LDO, 0x21=ULT_LDO confirms the address)\n");
++	return true;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index c0ca101..d0ca102 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -102,3 +102,8 @@ const char * gIOKernelConfigTables =
+     "     'IOMatchCategory' = SweetCamera;"
+     "   },"
++    "   {"
++    "     'IOClass'         = SweetRegulator;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetRegulator;"
++    "   },"
+ #endif
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index c1ca101..c2ca102 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -23,4 +23,5 @@
+ iokit/Kernel/arm/SweetGPU.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/SweetCamera.cpp                                 optional iokitcpp
++iokit/Kernel/arm/SweetRegulator.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp

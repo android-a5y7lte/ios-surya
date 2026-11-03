@@ -34,6 +34,13 @@ phone (test). Everything else is prepared in the repo already. After any reboot,
       Needs a sensor rail turned on (PMIC/regulator path - the cross-cutting blocker) + MCLK + reset GPIO.
       Also confirm the IMX682 slave addr from a surya vendor image (camxoverridesettings / sensor libs).
 
+## Regulator / PMIC (the shared unblocker for camera C2b, BT B3, audio)
+- [ ] **Regulator R1** (read-only PMIC probe, patch 0103). Boot with `sweetreg=1`, then
+      `grep -a "SWEET REG" logs/testNN.txt`. For each camera/BT rail it prints type/enable/voltage over SPMI.
+      Read-only, zero risk. Two things to learn: (1) which rails are already ON at boot, (2) that the LDO
+      peripherals respond (type 0x04/0x21). If a rail shows "no SPMI response", the SID/base guess is off -
+      paste the output and we adjust. This decides the whole regulator approach (direct SPMI vs RPMh).
+
 ## Needs the PC's dyld cache (~/dsc) - disassembly, no phone needed
 - [ ] **Audio next step**: extract the IOAudio2 "data exchange blocks" / "output streams" binary layout
       (commands in SURYA_NOTES.md "Audio next step"). Paste output back; then the stream code can be written.

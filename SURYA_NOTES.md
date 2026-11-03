@@ -1071,15 +1071,35 @@ STAGED PLAN (mirrors GPU/camera; one verifiable step at a time):
 BLOCKED-ON / TO FETCH: QCA firmware (crbtfw*.tlv, crnv*.bin) from a surya vendor image.
 Sources: surya-dump/live.dts; GENI SE regs from our patch 0060; qcom_geni_serial.c (grok.openbmc mirror).
 
-### Cross-cutting blocker: regulator / PMIC control (camera C2, Bluetooth B3, audio)
-Several subsystems stall at the same place - turning on a power rail. Camera sensors (cam_vio/vana/vdig),
-the WCN3990 (bt-vdd io/core/pa/xtal), and parts of audio all need LDOs/SMPS on the PMIC, controlled over
-SPMI/RPMh, for which XNU has no regulator framework. So the honest shared prerequisite for the "it's alive"
-steps (camera C2, BT B3) is a minimal regulator path: either (a) an SPMI + PMIC-arb driver to set the LDOs
-directly, or (b) drive RPMh, or (c) check whether the boot loader leaves the needed rails on (C1/B1 will
-tell us for some). Worth doing once; it unlocks multiple subsystems. Recorded so we tackle it deliberately
-rather than re-hitting it per subsystem. (We already touch SPMI-ish regions for backlight/WLED - review
-patch 0083 as a starting reference.)
+### Cross-cutting blocker: regulator / PMIC control (camera C2b, Bluetooth B3, audio)
+Several subsystems stall at the same place - turning on a power rail. GOOD NEWS: we already have a general
+SPMI read/write to any APPS-owned PMIC peripheral (sweet_spmi.c, patch 0083: sweet_spmi_init/read/write),
+and the camera/BT rails are plain PMIC LDOs on the SPMI bus - so we may be able to force a rail on directly
+over SPMI (write ENABLE +0x46 bit0x80, like SweetBacklight enables WLED) instead of building a full RPMh
+stack. The catch: these LDOs are modeled as RPMh-managed (qcom,rpmh-vrm-regulator), so a direct SPMI write
+only sticks if the LDO's SPMI peripheral is APPS-owned (not AOP/RPMh-owned); sweet_spmi_write already checks
+that and refuses otherwise. R1 (below) answers it.
+
+Verified rail -> LDO -> SID map (surya-dump/live.dts; SIDs pm6150=0, pm6150l=4, pm8009=0xa, all on
+qcom,spmi@c440000). pmic5 LDO SPMI peripheral base = 0x4000 + 0x100*(n-1). Common LDO regs (Linux
+qcom_spmi-regulator.c): TYPE +0x04 (0x04=LDO, 0x21=ULT_LDO), VOLTAGE_RANGE +0x40, VOLTAGE_SET +0x41,
+ENABLE +0x46 (bit0x80 = on):
+  cam_vio     = pm6150_l13  (sid 0, base 0x4c00)        cam_vana = pm8009_l6  (sid 0xa, base 0x4500)
+  bt_vdd_io   = pm6150_l10  (sid 0, base 0x4900)        bt_vdd_core = pm6150l_l2  (sid 4, base 0x4100)
+  bt_vdd_pa   = pm6150l_l10 (sid 4, base 0x4900)        bt_vdd_xtal = pm6150l_l1  (sid 4, base 0x4000)
+  (cam_vdig = phandles 0x507/0x508, LDO name not resolved in DT - identify before C2b.)
+
+STAGED PLAN:
+  - R1 (WRITTEN, patch 0103, boot-arg sweetreg=1): read-only. For each rail's LDO, sweet_spmi_read TYPE,
+    ENABLE, VRANGE, VSET and print. Self-validating (TYPE=0x04/0x21 confirms SID+base). Tells us which
+    rails the boot loader already left on, and that the peripherals are reachable. Zero risk. Not yet built.
+  - R2 (next, after R1 result): sweet_spmi_write ENABLE|0x80 (and VSET if needed) to turn one rail on; the
+    write self-reports if the APID is not APPS-owned (then we need the RPMh path instead). Add the target
+    LDO addrs to sp_write_allowed() in sweet_spmi.c first.
+  - If direct SPMI is refused (AOP-owned): build a minimal RPMh path - apps_rsc (DT label apps_rsc, line
+    ~3969/6821) TCS registers + cmd-db@c3f000c resource lookup (resource names e.g. "ldoa13") to send a
+    VRM enable command. Bigger; only if R2 shows we must.
+Once a rail can be turned on, camera C2b (sensor chip-id) and BT B3 (power WCN3990) both unlock.
 
 ### App Store: not achievable on this port
 The App Store app launches but cannot function: it needs device activation, an Apple ID and Apple's

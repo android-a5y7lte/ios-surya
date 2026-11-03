@@ -1028,16 +1028,58 @@ IOAudio2 device must advertise, get the binary layout CoreAudio expects (we have
   (list CoreAudio IOA2 symbols: ./ipsw dyld symaddr ~/dsc/dyld_shared_cache_arm64 --image CoreAudio | grep -i IOA2)
 Then the stream/data-exchange-block code can be written against the real layout. Needs the PC (dsc).
 
-### Bluetooth: WCN3990 over GENI HS-UART (feasible, substantial)
-Hardware (live.dts): bt_wcn3990 (compatible qca,wcn3990), a UART-attached BT controller with its own
-power rails (bt-vdd io/core/pa/xtal). BT HCI is over a GENI high-speed UART (qcom,msm-geni-serial-hs);
-BT-SCO audio is a separate SLIMbus path (btfmslim_codec on slim@62e40000). WiFi is the same combo via
-icnss@0x18800000. Bring-up = (1) a GENI UART driver in XNU (we only have GENI I2C so far), (2) WCN3990
-power-on sequence via the bt vregs, (3) QCA firmware download over the UART (crbtfw*.tlv rampatch +
-crnv*.bin nvm - NOT in our firmware dump; from a surya vendor.img), (4) bridge the QCA HCI to iOS's
-bluetoothd transport (iOS expects its own BT transport; cf. Bergamota docs/BT_IOS_TRANSPORT.md; HakiOS
-lists BT as not-working/help-wanted). More tractable than sensors/audio (self-contained UART+fw, no DSP)
-but the iOS transport bridge is the hard part. Parked behind GPU; recorded for later.
+### Bluetooth: WCN3990 over GENI HS-UART - groundwork (2026-11-03)
+BT is the most tractable of the remaining hardware subsystems: self-contained (UART + firmware), no DSP,
+and we ALREADY have a working GENI serial-engine driver (the GENI I2C in patches 0060/0063). A GENI UART
+is the same SE block with a different protocol config + the S (secondary) channel for RX. Two real
+blockers remain, both shared with other subsystems: powering the chip's rails (regulator/PMIC - see the
+cross-cutting note below) and bridging QCA HCI to iOS's own BT transport (the Apple-specific hard part).
+
+VERIFIED HARDWARE MAP (from surya-dump/live.dts):
+  - bt_wcn3990 (compat "qca,wcn3990"): rails bt-vdd-io (1.70-1.90V), bt-vdd-core (1.245-1.35V),
+    bt-vdd-pa (3.20-3.40V), bt-vdd-xtal (1.70-1.90V). No reset GPIO in the node - mainline wcn3990
+    is enabled by its regulators, not a BT_EN gpio.
+  - BT HCI UART: qcom,qup_uart@0x88c000 (compat "qcom,msm-geni-serial-hs"), reg 0x88c000 size 0x4000,
+    status ok, on the QUPv3_0 wrapper @0x8c0000. Clocks (gcc, phandle 0x27): se-clk id 0x4a, m-ahb 0x67,
+    s-ahb 0x68. IRQ GIC-SPI 604 (0x25c) + TLMM host-wake gpio 41 (0x29). wakeup-byte 0xfd. 4-wire
+    (TX/RX/CTS/RTS) via pinctrl 0x178/0x179/0x17a. (The 2nd HS-UART @0x890000 is disabled = debug uart.)
+  - BT-SCO audio is a separate SLIMbus path (btfmslim), NOT needed for HCI. WiFi shares the combo via
+    icnss - separate bring-up, ignore for BT.
+
+REGISTER MAP (GENI SE common block - verified, same as our GENI I2C driver patch 0060; UART-specific
+offsets verified from mainline drivers/tty/serial/qcom_geni_serial.c):
+  SE common: GENI_STATUS 0x040 (M_GENI_CMD_ACTIVE bit0), SER_M_CLK_CFG 0x048, FW_REVISION 0x068,
+    CLK_SEL 0x07c, DMA_MODE_EN 0x258, M_CMD0 0x600, M_CMD_CTRL 0x604, M_IRQ_STATUS 0x610, M_IRQ_EN 0x614,
+    M_IRQ_CLEAR 0x618, TX_FIFO 0x700, RX_FIFO 0x780, TX_FIFO_STATUS 0x800, RX_FIFO_STATUS 0x804.
+    S (RX) channel, standard geni-se.h, to confirm against our tree when writing: S_CMD0 0x630,
+    S_CMD_CTRL 0x634, S_IRQ_STATUS 0x640, S_IRQ_EN 0x644, S_IRQ_CLEAR 0x648.
+  UART-specific (qcom_geni_serial.c): TX_TRANS_CFG 0x25c, TX_WORD_LEN 0x268, TX_STOP_BIT_LEN 0x26c,
+    TX_TRANS_LEN 0x270, RX_TRANS_CFG 0x280, RX_WORD_LEN 0x28c, RX_STALE_CNT 0x294, TX_PARITY_CFG 0x2a4,
+    RX_PARITY_CFG 0x2a8. M opcode UART_START_TX=1; S opcode UART_START_READ=1.
+
+STAGED PLAN (mirrors GPU/camera; one verifiable step at a time):
+  - B1 (read-only, safe now): map SE 0x88c000, read GENI_STATUS + FW_REVISION, and the gcc SE-clk CBCR,
+    to see whether the UART is clocked at boot. Same shape as GPU G1 / camera C1. Writeable from here.
+  - B2: enable se-clk/m-ahb/s-ahb, configure the SE for UART (FIFO mode, 115200 8N1), and validate the
+    driver with GENI internal loopback (no chip needed) - TX a few bytes, read them back on RX.
+  - B3: power the WCN3990 rails (BLOCKER: regulator/PMIC control), then over the UART run the QCA EDL
+    sequence: read chip version (vendor cmd) and confirm WCN3990. Set the operating baud.
+  - B4: download rampatch crbtfw*.tlv + nvm crnv*.bin via the QCA TLV protocol, HCI reset. Firmware
+    blobs are NOT in our dump - pull from a surya vendor image.
+  - B5: bridge the QCA HCI stream to iOS's BT transport (bluetoothd expects its own transport; cf.
+    Bergamota BT_IOS_TRANSPORT notes; HakiOS lists BT as not-working/help-wanted). The hard part.
+BLOCKED-ON / TO FETCH: QCA firmware (crbtfw*.tlv, crnv*.bin) from a surya vendor image.
+Sources: surya-dump/live.dts; GENI SE regs from our patch 0060; qcom_geni_serial.c (grok.openbmc mirror).
+
+### Cross-cutting blocker: regulator / PMIC control (camera C2, Bluetooth B3, audio)
+Several subsystems stall at the same place - turning on a power rail. Camera sensors (cam_vio/vana/vdig),
+the WCN3990 (bt-vdd io/core/pa/xtal), and parts of audio all need LDOs/SMPS on the PMIC, controlled over
+SPMI/RPMh, for which XNU has no regulator framework. So the honest shared prerequisite for the "it's alive"
+steps (camera C2, BT B3) is a minimal regulator path: either (a) an SPMI + PMIC-arb driver to set the LDOs
+directly, or (b) drive RPMh, or (c) check whether the boot loader leaves the needed rails on (C1/B1 will
+tell us for some). Worth doing once; it unlocks multiple subsystems. Recorded so we tackle it deliberately
+rather than re-hitting it per subsystem. (We already touch SPMI-ish regions for backlight/WLED - review
+patch 0083 as a starting reference.)
 
 ### App Store: not achievable on this port
 The App Store app launches but cannot function: it needs device activation, an Apple ID and Apple's

@@ -1,9 +1,9 @@
 diff --git a/iokit/Kernel/arm/SweetShow.cpp b/iokit/Kernel/arm/SweetShow.cpp
 new file mode 100644
-index 0000000..d48ff3a
+index 0000000..2a5a330
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetShow.cpp
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,98 @@
 +/*
 + * surya on-screen probe (patch 0104): read-only summary of the regulator rails,
 + * the camera clock controller, and the GPU power state, printed to the phone's
@@ -13,8 +13,8 @@ index 0000000..d48ff3a
 + * Everything here only READS (SPMI via sweet_spmi.c patch 0083 for the PMIC
 + * LDOs; always-on camcc/gcc register files for the clocks; gpucc only if the
 + * GPU AHB clock is up, as in GPU G1). Nothing is written. After reading once it
-+ * loops printing a compact summary every ~3 s so the latest lines stay on the
-+ * screen for a photo.
++ * loops printing a compact summary (printf, like the other probes) so the
++ * latest lines stay on the framebuffer for a photo.
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <IOKit/IOService.h>
@@ -65,18 +65,13 @@ index 0000000..d48ff3a
 +		return false;
 +	}
 +
-+	/* --- read once --- */
-+	char railbuf[160];
-+	int n = 0;
++	/* --- read once (all read-only) --- */
++	const char *r[6];
 +	bool spmi = (sweet_spmi_init() == 0);
 +	for (unsigned i = 0; i < 6; i++) {
 +		uint8_t en = 0;
-+		const char *s = "?";
-+		if (spmi && sweet_spmi_read(rails[i].sid, rails[i].base + LDO_EN, &en) == 0) {
-+			s = (en & EN_ON) ? "ON" : "off";
-+		}
-+		n += snprintf(railbuf + n, sizeof(railbuf) - n, "%s=%s ", rails[i].name, s);
-+		if (n >= (int)sizeof(railbuf)) { break; }
++		r[i] = (spmi && sweet_spmi_read(rails[i].sid, rails[i].base + LDO_EN, &en) == 0)
++		    ? ((en & EN_ON) ? "ON" : "off") : "?";
 +	}
 +
 +	vm_offset_t cc = ml_io_map(CAMCC_PA, MAP_SZ);
@@ -93,17 +88,18 @@ index 0000000..d48ff3a
 +		cxg = (rd(gc, GPUCC_CX_GDSCR) & BIT31) ? "PWR_ON" : "off";
 +	}
 +
-+	/* --- hold on screen --- */
-+	for (;;) {
++	/* --- hold on screen: bounded loop (~days) so there is no unreachable code --- */
++	for (int k = 0; k < 100000; k++) {
 +		printf("SWEET SHOW: ===== probe results (photograph) =====\n");
-+		printf("SWEET SHOW: rails %s\n", railbuf);
++		printf("SWEET SHOW: rails cam_vio=%s cam_vana=%s bt_io=%s bt_core=%s bt_pa=%s bt_xtal=%s\n",
++		    r[0], r[1], r[2], r[3], r[4], r[5]);
 +		printf("SWEET SHOW: cam pll0=0x%08x titan=%s cci0_clk=%s\n",
 +		    pll0, titan ? "PWR_ON" : "off", cci ? "on" : "off");
 +		printf("SWEET SHOW: gpu gpll0=%s ahb=%s cx_gdsc=%s\n",
 +		    (vote & (1u << 15)) ? "voted" : "no", gahb ? "on" : "off", cxg);
 +		IOSleep(3000);
 +	}
-+	return true; /* not reached */
++	return true;
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp

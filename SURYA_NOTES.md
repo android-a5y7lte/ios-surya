@@ -996,3 +996,34 @@ Firmware (a618 = a6xx gen1; Linux a6xx_catalog.c a618 entry):
 
 Order after G2: G3 GPU SMMU context (read-only dump first, then a context bank for the GMU SIDs 4/5);
 G4 GMU firmware into its TCM + boot + HFI handshake; G5 GX rail via the GMU (a6xx_gmu_gfx_rail_on, OOB).
+
+### White UI fix (no GPU): suryablur (2026-11-03)
+The white App Library background, folders, dock and the blur behind an opening app are CoreAnimation
+"materials" (blur) falling back to white with no GPU. iOS's accessibility settings replace those blurs
+with solid fills the CPU draws. HakiOS does this in SpringBoard via libAccessibility setters
+(inject_sb.c: boot-args ax_rt -> _AXSSetEnhanceBackgroundContrastEnabled, ax_rm -> _AXSSetReduceMotionEnabled).
+We have no SpringBoard injection, so `tools/suryablur/` is a standalone tool (built on Linux like suryanet,
+ad-hoc signed) that dlopens /usr/lib/libAccessibility.dylib and calls _AXSSetEnhanceBackgroundContrastEnabled
+and _AXSSetReduceTransparencyEnabled. Test when back at PC:
+  scp tools/suryablur/suryablur root@192.168.7.2:/var/root/bin/
+  ssh root@192.168.7.2 '/var/root/bin/suryablur 1'      # then respring: kill SpringBoard (launchd restarts it)
+Expect the white areas to become solid grey/tinted. `suryablur 0` reverts. Unknown until tested whether the
+setters exist in this libAccessibility and whether it fixes Safari's white page too.
+
+### Sensors on surya: behind the SLPI sensor DSP (not a simple I2C driver)
+The IMU/ALS/proximity/SAR chips are NOT apps-CPU I2C devices in the kernel DT; they are owned by the SLPI/SSC
+sensor DSP (live.dts: qcom,fastrpc-adsp-sensors-pdr, ssctl-instance-id) and configured by SSC JSONs. Chips
+present (IMU is multi-sourced per unit): bmi160, bmi220, bmi26x, icm4x6xx, lsm6ds3c, lsm6dso; ALS/prox stk3a5x
+(huaxing/tianma panel variants); SAR adux1050; plus mag cal. So sensor bring-up means either booting SLPI +
+QMI/fastRPC (large, like the ADSP), or driving a chip directly over its I2C/SPI bus after taking it from the DSP
+(need the schematic/downstream bus+addr). Parallels the audio ADSP: a big subsystem, not a quick driver. Parked.
+
+### Audio next step - disassembly to run on the PC (dsc is in ~/dsc)
+mediaserverd stopped at "data exchange blocks" (patch 0092). To build the stream + data-exchange-block the
+IOAudio2 device must advertise, get the binary layout CoreAudio expects (we have the key names, not the structs):
+  cd ~/tools/ipsw
+  ./ipsw dyld a2s ~/dsc/dyld_shared_cache_arm64 0x1afb02064   # confirm "data exchange blocks" addr/image
+  ./ipsw dyld disass ~/dsc/dyld_shared_cache_arm64 --image CoreAudio \
+     --symbol '-[HALS_IOA2UCDevice ...]'   # the method reading "output streams"/"data exchange blocks"
+  (list CoreAudio IOA2 symbols: ./ipsw dyld symaddr ~/dsc/dyld_shared_cache_arm64 --image CoreAudio | grep -i IOA2)
+Then the stream/data-exchange-block code can be written against the real layout. Needs the PC (dsc).

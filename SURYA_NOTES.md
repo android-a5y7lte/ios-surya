@@ -1122,8 +1122,11 @@ RESULTS:
     direct path rather than the APID/channel path for peripherals APPS does not "own"; (b) the LDO peripheral
     base (0x4000+0x100*(n-1)) or SID may be wrong; (c) the LDOs are RPMh/AOP-owned and not APPS-accessible at
     all - which would mean the direct-SPMI rail-enable shortcut is out and the RPMh path is required.
-    NEXT: read sweet_spmi_read's impl (OBS vs APID), re-check one LDO base against a known-good peripheral,
-    re-run R1; if still no response, the camera/BT rails need the RPMh path (bigger).
+    ROOT CAUSE FOUND (not hardware): sweet_spmi_read (patch 0083) has an allowlist permitting only battery +
+    WLED reads; the LDO reads were rejected at the guard before touching hardware. FIXED in patch 0106 - the
+    guard now also allows the LDO range (periph 0x40-0x5f) on sid 0/4/0xa. The read path needs only a valid
+    APID (no ownership gate), so if the LDOs have APIDs, R1 will now report their real enable/voltage state,
+    keeping the direct-SPMI rail-enable approach alive. Re-run R1 after a build.
   - G2 (GPU, sweetgpu=2): SUCCESS, hardware-verified. At boot the GPU CX + GX GDSCs are collapsed
     (0x00222001), gcc gpu AHB on but memnoc/snoc_dvm off, gpll0 not voted for the GPU. G2 voted gpll0
     (0x01241d7b -> 0x01259d7b), enabled the gcc memnoc/snoc_dvm branches, POWERED THE CX GDSC
@@ -1133,7 +1136,11 @@ RESULTS:
     power milestone, done on real hardware. Next GPU step: G3/G4 = load the GMU firmware + HFI handshake, then
     the SMMU, then GX, then the IOKit/Metal provider. (Minor: G1 speed-bin decode printed 167 - the qfprom
     0x41a0 mask/shift is wrong; cosmetic. Raw fuse 0x14e68410.)
-NOT YET RUN (next session): C2a (sweetcam=2 - power the CCI controller), and the R1 fix. Same log-ring method.
+BUILT, NOT YET TESTED (re-run with the log-ring method once a build is green):
+  - G3 (patch 0105, sweetgpu=3): read-only GPU SMMU probe after G2; expect non-zero SMMU IDs = GPU bus alive.
+  - R1 fixed (patch 0106, sweetreg=1): rails should now report ON/off + voltage, not "no SPMI response".
+  - C2a (patch 0102, sweetcam=2): power the CCI controller + read HW_VERSION.
+Next GPU after G3: G4 = GMU firmware (a630_gmu.bin) load + HFI handshake (needs the firmware blob sourced).
 
 ### WiFi (WCN3990 via icnss): the largest subsystem - long-term, not near-term (2026-11-03)
 Honest feasibility note. WiFi is harder than Bluetooth and on par with / beyond the GPU. Not near-term.

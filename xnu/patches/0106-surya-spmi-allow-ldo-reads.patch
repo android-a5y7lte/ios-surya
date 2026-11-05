@@ -1,0 +1,17 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 8fcac88..6e4191b 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -120,7 +120,11 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ 	    (peripheral == 0x10 || peripheral == 0x11 || peripheral == 0x12 ||
+ 	    peripheral == 0x13 || peripheral == 0x48);
+ 	bool wled = sid == 5 && (peripheral == 0xd8 || peripheral == 0xd9);
+-	if (!sp_ready || !out || addr > 0xffffu || (!battery && !wled)) {
++	/* surya: read-only access to the PMIC LDO peripherals (0x40-0x5f) on pm6150
++	 * (sid 0), pm6150l (sid 4) and pm8009 (sid 0xa), for the rail probe (R1). */
++	bool ldo = (sid == 0 || sid == 4 || sid == 0xa) &&
++	    peripheral >= 0x40u && peripheral <= 0x5fu;
++	if (!sp_ready || !out || addr > 0xffffu || (!battery && !wled && !ldo)) {
+ 		return -1;
+ 	}
+ 	IOLockLock(sp_lock);

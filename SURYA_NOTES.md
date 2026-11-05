@@ -1200,6 +1200,18 @@ on the device then `adb pull` (binary-safe):
   adb pull /tmp/ring.bin OUT.bin ; python3 tools/sweet-log.py OUT.bin OUT.txt
 (SKIP = partition_blocks - 1025.) TODO: make sweet-log-pull.sh fall back to this when exec-out yields 0.
 
+### G4d-a built (2026-11-05): read-only GMU SMMU context-bank probe (patch 0110, sweetgpu>=7)
+Before touching any TTBR (G4d-b, the part that can fault), first LEARN the SMMU layout. sweet_gpu_g4d_smmu_probe()
+reads (only) the GPU SMMU (0x5040000): decodes geometry from ID1 (pgshift/numpage/num_cb/num_smr), dumps the
+stream-match table (SMR/S2CR: which stream ID -> which context bank) and every context bank's CBAR + SCTLR/TTBR0/
+TCR/FSR. GOAL: find whether a CB is already enabled (SCTLR M=1) with a non-zero TTBR0 (= ABL already set the GMU
+context up for us) and which CB index the GMU uses. Reconstructed the applied SweetGPU.cpp by replaying patches
+0095..0109 (base index matched 0c678fc exactly => exact), standalone clang -Wformat clean, git apply --check clean.
+Expected from G3's IDs (ID1=0x20008005): pgshift=12, numpage=8, GR1 @ +0x1000, CB regs @ +0x8000, num_cb=5,
+num_smr=5. PENDING HW TEST: build sweetgpu=7, boot variant 5, pull ring, read the "G4d-a cb[n]" lines.
+NEXT after the probe tells us the layout: G4d-b (set up/confirm the GMU context bank + map a DMA buffer), then
+G4d-c (HFI queue table + HFI handshake).
+
 ### G4d plan (NEXT): HFI - let the kernel talk to the running GMU
 Now the GMU runs, the next real step is HFI (Host-Firmware Interface): the message channel the kernel uses to
 ask the GMU to power the GX domain, set GPU freq (DCVS), and eventually accept CP submissions. Needs: a GMU

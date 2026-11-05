@@ -1,0 +1,100 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 0c678fc..bf210a6 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -14,6 +14,7 @@
+  *   sweetgpu>=4 +G4a: read-only dump of the GMU core registers (patch 0107).
+  *   sweetgpu>=5 +G4b: load the GMU firmware into its TCM, core held in reset (patch 0108).
+  *   sweetgpu>=6 +G4c: boot the GMU (release reset, poll for 0xbabeface) (patch 0109).
++ *   sweetgpu>=7 +G4d-a: read-only probe of the GMU's SMMU context banks (patch 0110).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -126,6 +127,15 @@ OSDefineMetaClassAndStructors(SweetGPU, IOService);
+ /* GPU bus interface (GBIF), in the CX half: kgsl-3d0 @ 0x5000000 + word 0x3c00 (live.dts) */
+ #define GBIF_PA                         0x0500f000u
+ #define GBIF_HALT                       (4u * 0x45u)
++/* G4d-a SMMU context-bank probe (ARM SMMU-v2 GR0 SMR/S2CR + per-CB registers;
++ * the page geometry is derived from ID1 at runtime). Read-only. */
++#define SMMU_SMR0                       0x0800u         /* GR0 stream-match regs, +4*i */
++#define SMMU_S2CR0                      0x0c00u         /* GR0 stream-to-context regs, +4*i */
++#define SMMU_CB_SCTLR                   0x0000u         /* per-CB: BIT(0) M = MMU enabled */
++#define SMMU_CB_TTBR0_LO                0x0020u
++#define SMMU_CB_TTBR0_HI                0x0024u
++#define SMMU_CB_TCR                     0x0030u
++#define SMMU_CB_FSR                     0x0058u
+ 
+ static inline uint32_t
+ rd(vm_offset_t base, uint32_t off)
+@@ -397,6 +407,61 @@ sweet_gpu_g4c_boot(void)
+ 	}
+ }
+ 
++/* G4d-a: read-only probe of the GPU SMMU's context banks, to learn how the GMU's
++ * translation context is (or is not) set up before we touch any TTBR in G4d-b.
++ * The GMU reaches its HFI/log buffers in DRAM through this same ARM SMMU-v2 on
++ * its own stream ID -> context bank. This dumps the stream-match table (which SID
++ * maps to which CB) and every context bank's SCTLR/TTBR0/TCR/FSR, so we can see
++ * whether a CB is already enabled (M bit) with a live pagetable - i.e. did the
++ * boot loader set the GMU up for us - and which CB index it uses. Pure reads
++ * inside the already-mapped 0x10000 SMMU register window: safe, like G3. */
++static void
++sweet_gpu_g4d_smmu_probe(void)
++{
++	printf("SWEET GPU: G4d-a read-only GMU SMMU context-bank probe (smmu-v2 @ 0x5040000)\n");
++	vm_offset_t s = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
++	uint32_t id0 = rd(s, SMMU_ID0);
++	uint32_t id1 = rd(s, SMMU_ID1);
++	uint32_t pgshift = (id1 & (1u << 31)) ? 16u : 12u;
++	uint32_t numpage = 1u << (((id1 >> 28) & 7u) + 1u);
++	uint32_t num_cb  = id1 & 0xffu;                  /* ID1 NUMCB */
++	uint32_t num_smr = id0 & 0xffu;                  /* ID0 NUMSMRG */
++	uint32_t gr1     = 1u << pgshift;                /* GR1 page holds the CBARs */
++	uint32_t cbbase  = numpage << pgshift;           /* first context-bank reg page */
++	uint32_t pgsize  = 1u << pgshift;
++	printf("SWEET GPU: G4d-a geom pgshift=%u numpage=%u gr1=0x%x cb_base=0x%x num_cb=%u num_smr=%u scr0=0x%08x\n",
++	    pgshift, numpage, gr1, cbbase, num_cb, num_smr, rd(s, SMMU_sCR0));
++
++	/* stream-match table: which stream ID (the GMU's) lands in which context bank */
++	for (uint32_t i = 0; i < num_smr && i < 64u; i++) {
++		uint32_t smr  = rd(s, SMMU_SMR0 + 4u * i);
++		uint32_t s2cr = rd(s, SMMU_S2CR0 + 4u * i);
++		printf("SWEET GPU: G4d-a smr[%u]=0x%08x (valid=%u id=0x%04x mask=0x%04x) s2cr=0x%08x (type=%u cbndx=%u)\n",
++		    i, smr, (smr >> 31) & 1u, smr & 0xffffu, (smr >> 16) & 0x7fffu,
++		    s2cr, (s2cr >> 16) & 3u, s2cr & 0xffu);
++	}
++
++	/* clamp to what fits in the mapped window, then dump each CB's CBAR + registers */
++	uint32_t maxcb = (cbbase < GPU_SMMU_SIZE) ? ((GPU_SMMU_SIZE - cbbase) >> pgshift) : 0u;
++	if (num_cb > maxcb) {
++		printf("SWEET GPU: G4d-a clamping num_cb %u -> %u (mapped window is 0x%x)\n",
++		    num_cb, maxcb, GPU_SMMU_SIZE);
++		num_cb = maxcb;
++	}
++	for (uint32_t i = 0; i < num_cb && i < 64u; i++) {
++		uint32_t cbar  = rd(s, gr1 + 4u * i);
++		vm_offset_t cb = s + cbbase + (vm_offset_t)i * pgsize;
++		uint32_t sctlr = rd(cb, SMMU_CB_SCTLR);
++		uint32_t t_lo  = rd(cb, SMMU_CB_TTBR0_LO);
++		uint32_t t_hi  = rd(cb, SMMU_CB_TTBR0_HI);
++		uint32_t tcr   = rd(cb, SMMU_CB_TCR);
++		uint32_t fsr   = rd(cb, SMMU_CB_FSR);
++		printf("SWEET GPU: G4d-a cb[%u] cbar=0x%08x sctlr=0x%08x (M=%u) ttbr0=0x%08x%08x tcr=0x%08x fsr=0x%08x\n",
++		    i, cbar, sctlr, sctlr & 1u, t_hi, t_lo, tcr, fsr);
++	}
++	printf("SWEET GPU: G4d-a done - an enabled CB (M=1) with a non-zero ttbr0 is a live context (the GMU's, if ABL set it up)\n");
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -447,6 +512,9 @@ SweetGPU::start(IOService *provider)
+ 	if (enabled >= 6) {
+ 		sweet_gpu_g4c_boot();
+ 	}
++	if (enabled >= 7) {
++		sweet_gpu_g4d_smmu_probe();
++	}
+ 	return true;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

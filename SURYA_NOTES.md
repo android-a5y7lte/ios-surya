@@ -1136,11 +1136,28 @@ RESULTS:
     power milestone, done on real hardware. Next GPU step: G3/G4 = load the GMU firmware + HFI handshake, then
     the SMMU, then GX, then the IOKit/Metal provider. (Minor: G1 speed-bin decode printed 167 - the qfprom
     0x41a0 mask/shift is wrong; cosmetic. Raw fuse 0x14e68410.)
-BUILT, NOT YET TESTED (re-run with the log-ring method once a build is green):
-  - G3 (patch 0105, sweetgpu=3): read-only GPU SMMU probe after G2; expect non-zero SMMU IDs = GPU bus alive.
-  - R1 fixed (patch 0106, sweetreg=1): rails should now report ON/off + voltage, not "no SPMI response".
-  - C2a (patch 0102, sweetcam=2): power the CCI controller + read HW_VERSION.
-Next GPU after G3: G4 = GMU firmware (a630_gmu.bin) load + HFI handshake (needs the firmware blob sourced).
+TESTED 2026-11-05 (log ring, build 42067534837):
+  - G3 (sweetgpu=3): SUCCESS. GPU SMMU @0x5040000 after G2: sCR0=0x00200626 ID0=0x48016605 ID1=0x20008005
+    ID2=0x00007511 ID7=0 sGFSR=0 (no fault). Non-zero/valid IDs => the GPU SMMU is clocked and alive once CX
+    is powered. GPU bus confirmed; G4 prerequisite met.
+  - C2a (sweetcam=2): PARTIAL. titan_top_gdsc 0x0022f001 -> 0xf822f000 (PWR_ON) - we CAN power the camera
+    titan domain (same as GPU CX). BUT cam_cc_cci_0_clk CBCR stayed 0x00000000 after writing BIT(0), and cci0
+    HW_VERSION read 0x0 before+after reset => the CCI clock did NOT start, so the CCI block is unclocked. Root
+    cause: the CCI RCG (cci_0_clk_src) is unconfigured (reads 0), so enabling the branch does nothing. NEXT
+    (C2b-pre): configure cci_0_clk_src RCG (src+div, 37.5 MHz, CMD_UPDATE) like G2 did for the GMU RCG, then
+    enable the branch, then HW_VERSION should be non-zero. (camcc clock CBCRs read 0 until the RCG/camcc top
+    is up - the titan GDSC register is separately accessible, which is why we could power it.)
+  - R1 (sweetreg=1, with the 0106 allowlist fix): STILL "no SPMI response" for all 6 rails. The guard fix is
+    in the build, so the failure is now downstream - sp_find_apid returns no APID for these LDO PPIDs. Battery
+    (sid0 0x1x) and WLED (sid5 0xdx) DO work over the same path, so APPS has APIDs for those but NOT for the
+    LDO peripherals => the camera/BT LDOs are almost certainly RPMh/AOP-owned, not in the APPS SPMI arbiter
+    map. CONCLUSION (to confirm with a 1-shot diagnostic that logs the exact failure point + dumps the APPS
+    APID table): direct-SPMI rail-enable is likely OUT; powering cam/BT rails needs the RPMh path (RSC/TCS +
+    cmd-db). IMPORTANT: the GPU track does NOT need these rails (GMU runs on the CX GDSC we already power), so
+    GPU G4 can proceed independently.
+Next GPU: G4 = GMU firmware (a630_gmu.bin) load + HFI handshake. Reference: HakiOS hakios-xnu-kernel drivers/
+  + hakios-sm7325 soc/ (POCO X5 Pro, SM7325, same a6xx family). Needs a630_gmu.bin sourced (linux-firmware
+  qcom/ or a surya vendor image). Does NOT depend on the PMIC-rail/RPMh work.
 
 ### WiFi (WCN3990 via icnss): the largest subsystem - long-term, not near-term (2026-11-03)
 Honest feasibility note. WiFi is harder than Bluetooth and on par with / beyond the GPU. Not near-term.

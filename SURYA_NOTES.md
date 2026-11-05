@@ -1155,9 +1155,31 @@ TESTED 2026-11-05 (log ring, build 42067534837):
     APID table): direct-SPMI rail-enable is likely OUT; powering cam/BT rails needs the RPMh path (RSC/TCS +
     cmd-db). IMPORTANT: the GPU track does NOT need these rails (GMU runs on the CX GDSC we already power), so
     GPU G4 can proceed independently.
-Next GPU: G4 = GMU firmware (a630_gmu.bin) load + HFI handshake. Reference: HakiOS hakios-xnu-kernel drivers/
-  + hakios-sm7325 soc/ (POCO X5 Pro, SM7325, same a6xx family). Needs a630_gmu.bin sourced (linux-firmware
-  qcom/ or a surya vendor image). Does NOT depend on the PMIC-rail/RPMh work.
+### G4 plan: GMU firmware load + boot (recipe from mainline a6xx_gmu.c, 2026-11-05)
+G4 wakes the GMU microcontroller - the real "turn the GPU on". It does NOT need the PMIC rails (runs on the
+CX GDSC we already power in G2). Boot recipe (mainline a6xx_gmu_fw_start/_start, cold boot, legacy a630/a615):
+  1. GENERAL_7 = 1 (register retention).
+  2. RPMh init (a6xx_gmu_rpmh_init): program the RSCC (GMU+0x23000) + PDC cfg(0xb290000)/seq(0xb490000) sleep/
+     wake sequences. *** SoC-SPECIFIC and the hard part - SM7150 values differ from SDM845/SM7325; must come
+     from HakiOS hakios-sm7325 (closest a6xx XNU port), the surya vendor kgsl, or the GMU fw's embedded data.
+  3. Load firmware: reject if > 0x8000 bytes; copy a630_gmu.bin as u32 words into CM3_ITCM_START + i (flat,
+     no header parse - the simple legacy path).
+  4. CM3_FW_INIT_RESULT = 0; CM3_BOOT_CONFIG = 0x02.
+  5. HFI_QTBL_ADDR = hfi queue iova (needs GMU SMMU + a mapped HFI buffer - depends on a GMU context bank);
+     HFI_QTBL_INFO = 1. (Can be deferred - FW_INIT fires before HFI.)
+  6. AHB_FENCE_RANGE_0 = (1u<<31)|(0xa<<18)|0xa0; HFI_SFR_ADDR = chipid (core<<24|major<<16|minor<<12|patch<<8).
+  7. power_config: SYS_BUS_CONFIG=0x1, PWR_COL_INTER_FRAME_CTRL=0x9c40400, hyst regs, RPMH_CTRL bits.
+  8. start: CM3_SYSRESET=1 then =0; POLL CM3_FW_INIT_RESULT == 0xbabeface (interval 100, timeout 10000).
+     *** THIS is the G4 milestone: 0xbabeface = the GMU firmware booted. ***
+  9. (later/G5) gfx_rail_on OOB, SPTPRAC power, hfi_start (HFI_CTRL_INIT=1, poll HFI_CTRL_STATUS bit0).
+STILL NEEDED before writing G4: (a) the exact GMU register offsets + base convention (mainline byte-offset
+vs downstream kgsl 0x506a000-relative) - get from HakiOS or a6xx_gmu.xml.h; (b) the SM7150 RPMh/RSCC/PDC
+sequence (step 2); (c) a630_gmu.bin (test); (d) HFI buffer via GMU SMMU (step 5, can defer).
+SUB-STEPS (incremental, as G1->G2->G3): G4a read-only GMU register dump (verify offsets + baseline, safe);
+G4b fw load into ITCM + read-back; G4c RPMh/PDC/RSCC; G4d CM3 boot + poll 0xbabeface. HakiOS hakios-sm7325
+soc/ + hakios-xnu-kernel drivers/ are the primary reference (same a6xx XNU-port problem).
+TO FETCH FROM A SURYA VENDOR IMAGE (one pull gives several): a630_gmu.bin + a630_sqe.fw (GPU), the kgsl
+RSCC/PDC sequence data, plus the camera (IMX682) + WCN3990 BT firmware for later. Does NOT depend on RPMh-rail work.
 
 ### WiFi (WCN3990 via icnss): the largest subsystem - long-term, not near-term (2026-11-03)
 Honest feasibility note. WiFi is harder than Bluetooth and on par with / beyond the GPU. Not near-term.

@@ -55,6 +55,13 @@ if [ "$VARIANT" = 5 ]; then
 	else
 		echo "note: $FW missing (or SURYA_TOUCH=0): touch disabled" >&2
 	fi
+	# GPU GMU firmware (patch 0108, sweetgpu>=5 loads it into the GMU's TCM).
+	GMUFW=research/fw/a630_gmu.bin
+	if [ -f "$GMUFW" ] && [ "${SURYA_GMUFW:-1}" = 1 ]; then
+		BLOB+=(--blob "GmuFW=$GMUFW")
+	else
+		echo "note: $GMUFW missing (or SURYA_GMUFW=0): GPU G4b fw-load disabled" >&2
+	fi
 	[ -f research/ipsw-x/d22ap.adt ] || echo "warning: research/ipsw-x/d22ap.adt missing: iOS will see an iPod with a Home button" >&2
 else
 	KEYSLOG='sweetkeys=0 sweetlog=0'

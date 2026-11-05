@@ -1,0 +1,103 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 3d54836..1870828 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -12,6 +12,7 @@
+  *   sweetgpu>=2 G1, then G2: power the CX domain on and clock the GMU rail.
+  *   sweetgpu>=3 G1+G2, then G3: read-only check the GPU SMMU is alive (patch 0105).
+  *   sweetgpu>=4 +G4a: read-only dump of the GMU core registers (patch 0107).
++ *   sweetgpu>=5 +G4b: load the GMU firmware into its TCM, core held in reset (patch 0108).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -27,8 +28,10 @@
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOLib.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
+ 
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern "C" vm_offset_t ml_static_ptovirt(vm_offset_t paddr);
+ 
+ class SweetGPU : public IOService {
+ 	OSDeclareDefaultStructors(SweetGPU);
+@@ -99,6 +102,8 @@ OSDefineMetaClassAndStructors(SweetGPU, IOService);
+ #define GMU_RSCC_CONTROL_ACK            GMU_WORD(0x9308u)
+ #define GMU_AO_GPU_CX_BUSY_STATUS       GMU_WORD(0x930cu)
+ #define GMU_AHB_FENCE_STATUS            GMU_WORD(0x9313u)
++#define GMU_ITCM                        GMU_WORD(0x0c00u) /* code+data TCM window (ITCM then DTCM, contiguous) */
++#define GMU_DTCM_VERSIONS               GMU_WORD(0x1c00u + 0xff8u) /* firmware's version words, read back after load */
+ 
+ static inline uint32_t
+ rd(vm_offset_t base, uint32_t off)
+@@ -248,6 +253,60 @@ sweet_gpu_g4a_gmu(void)
+ 	printf("SWEET GPU: G4a done (GMU answers => ready for G4b fw load; fw_init_result target is 0xbabeface)\n");
+ }
+ 
++/* G4b: load the GMU firmware (a630_gmu.bin, legacy flat image) into the GMU's TCM,
++ * with the CM3 core HELD IN RESET so it cannot run. The firmware arrives as the
++ * "GmuFW" payload blob (tools/surya-test4.sh --blob GmuFW=..., read via the ADT
++ * /chosen/memory-map like TouchFW). a630/a615 use the flat path (mainline
++ * a6xx_gmu.c legacy): copy size/4 words straight into the ITCM window (which runs
++ * contiguously into DTCM). Then read back + verify, and print the firmware's own
++ * version words. No RSCC/RPMH writes and no reset release here - that is G4c -
++ * so this step cannot start or hang the GMU. */
++static void
++sweet_gpu_g4b_load(void)
++{
++	DTEntry mm;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &mm) != kSuccess ||
++	    SecureDTGetProperty(mm, "GmuFW", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		printf("SWEET GPU: G4b no /chosen/memory-map GmuFW (tools/surya-test4.sh --blob GmuFW=...)\n");
++		return;
++	}
++	uint64_t fw_pa = reg[0], fw_size = reg[1];
++	if (fw_size == 0 || fw_size > 0x8000u || (fw_size & 3u) != 0) {
++		printf("SWEET GPU: G4b bad GmuFW size 0x%llx (want nonzero, <=0x8000, 4-aligned)\n", fw_size);
++		return;
++	}
++	const uint32_t *fw = (const uint32_t *)ml_static_ptovirt((vm_offset_t)fw_pa);
++	if (fw == NULL) {
++		printf("SWEET GPU: G4b could not map GmuFW pa=0x%llx\n", fw_pa);
++		return;
++	}
++	printf("SWEET GPU: G4b load GMU firmware pa=0x%llx size=0x%llx (legacy flat -> TCM)\n", fw_pa, fw_size);
++
++	vm_offset_t g = ml_io_map(GMU_PA, GMU_SIZE);
++	wr(g, GMU_CM3_SYSRESET, 1);  /* hold the core in reset while loading */
++	wr(g, GMU_GENERAL_7, 1);     /* register retention */
++
++	uint32_t words = (uint32_t)(fw_size >> 2);
++	for (uint32_t i = 0; i < words; i++) {
++		*(volatile uint32_t *)(g + GMU_ITCM + 4u * i) = fw[i];
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++
++	uint32_t wrong = 0;
++	for (uint32_t i = 0; i < words; i++) {
++		if (rd(g, GMU_ITCM + 4u * i) != fw[i]) {
++			wrong++;
++		}
++	}
++	printf("SWEET GPU: G4b wrote %u words to the TCM; read-back mismatches=%u\n", words, wrong);
++	printf("SWEET GPU: G4b firmware versions (from DTCM) core=0x%08x power=0x%08x hfi=0x%08x\n",
++	    rd(g, GMU_DTCM_VERSIONS), rd(g, GMU_DTCM_VERSIONS + 8), rd(g, GMU_DTCM_VERSIONS + 16));
++	printf("SWEET GPU: G4b done - firmware loaded, core STILL IN RESET (G4c boots it). mismatches=0 => load good.\n");
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -292,6 +351,9 @@ SweetGPU::start(IOService *provider)
+ 	if (enabled >= 4) {
+ 		sweet_gpu_g4a_gmu();
+ 	}
++	if (enabled >= 5) {
++		sweet_gpu_g4b_load();
++	}
+ 	return true;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

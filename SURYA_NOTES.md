@@ -1167,6 +1167,16 @@ FIRMWARE DELIVERY for G4b: a630_gmu.bin (32K, have it in research/fw/) must reac
   from the ADT, then copies it word-by-word into GMU_ITCM (word 0x0c00). HakiOS hakios.adreno.c has the full
   load + RSCC-wake + CM3-boot sequence to mirror.
 
+### G4b result (2026-11-05, log ring): GMU firmware LOADED + verified
+sweetgpu=5. a630_gmu.bin delivered as the GmuFW ADT blob (surya-test4.sh --blob; needs `git pull` on the PC
+so the local script has it). "G4b load GMU firmware pa=0x102504000 size=0x8000 (legacy flat -> TCM); wrote
+8192 words to the TCM; read-back mismatches=0" => the 32K firmware is in the GMU ITCM+DTCM window, verified
+word-for-word. firmware versions read 0 (that DTCM version slot is an a650-block-format thing; the a630 flat
+image doesn't use it - cosmetic; mismatches=0 is the real proof). Core still held in reset. a630_gmu.bin is
+CONFIRMED the legacy flat format (not a650 blocks). NEXT: G4c = release reset + RSCC wake + RPMH + poll
+cm3_fw_init_result for 0xbabeface (the GMU firmware booting). Build from HakiOS hakios.adreno.c step 15
+(start the GMU) + the RSCC wake (~line 1930). This is the riskiest write step (can hang) - mirror carefully.
+
 ### G4 plan: GMU firmware load + boot (recipe from mainline a6xx_gmu.c, 2026-11-05)
 G4 wakes the GMU microcontroller - the real "turn the GPU on". It does NOT need the PMIC rails (runs on the
 CX GDSC we already power in G2). Boot recipe (mainline a6xx_gmu_fw_start/_start, cold boot, legacy a630/a615):

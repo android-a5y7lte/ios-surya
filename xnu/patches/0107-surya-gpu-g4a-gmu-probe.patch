@@ -1,0 +1,77 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 831d90e..3d54836 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -11,6 +11,7 @@
+  *   sweetgpu=1  read only, logged "SWEET GPU: ..." (G1).
+  *   sweetgpu>=2 G1, then G2: power the CX domain on and clock the GMU rail.
+  *   sweetgpu>=3 G1+G2, then G3: read-only check the GPU SMMU is alive (patch 0105).
++ *   sweetgpu>=4 +G4a: read-only dump of the GMU core registers (patch 0107).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -78,6 +79,27 @@ OSDefineMetaClassAndStructors(SweetGPU, IOService);
+ #define SMMU_ID7                        0x003cu
+ #define SMMU_sGFSR                      0x0048u
+ 
++/* GMU (qcom,gmu "kgsl_gmu_reg" @ 0x506a000, live.dts). a6xx GMU register offsets
++ * are WORD offsets (x4 for bytes) - same across the a6xx family; values taken from
++ * HakiOS hakios.adreno.c (SM7325, same a6xx GMU) which maps its GMU at 0x3d6a000.
++ * Read-only in G4a. */
++#define GMU_PA                          0x0506a000u
++#define GMU_SIZE                        0x00034000u
++#define GMU_WORD(n)                     (4u * (n))
++#define GMU_CM3_SYSRESET                GMU_WORD(0x5000u)
++#define GMU_CM3_BOOT_CONFIG             GMU_WORD(0x5001u)
++#define GMU_CM3_FW_INIT_RESULT          GMU_WORD(0x501cu) /* 0xbabeface once fw has started */
++#define GMU_CM3_CFG                     GMU_WORD(0x502du)
++#define GMU_SPTPRAC_PWR_CLK_STATUS      GMU_WORD(0x50d0u)
++#define GMU_RPMH_POWER_STATE            GMU_WORD(0x50ecu)
++#define GMU_HFI_CTRL_STATUS             GMU_WORD(0x5180u)
++#define GMU_HFI_VERSION_INFO            GMU_WORD(0x5181u)
++#define GMU_GENERAL_7                   GMU_WORD(0x51ccu)
++#define GMU_AO_HOST_INTERRUPT_STATUS    GMU_WORD(0x9305u)
++#define GMU_RSCC_CONTROL_ACK            GMU_WORD(0x9308u)
++#define GMU_AO_GPU_CX_BUSY_STATUS       GMU_WORD(0x930cu)
++#define GMU_AHB_FENCE_STATUS            GMU_WORD(0x9313u)
++
+ static inline uint32_t
+ rd(vm_offset_t base, uint32_t off)
+ {
+@@ -206,6 +228,26 @@ sweet_gpu_g3_smmu(void)
+ 	printf("SWEET GPU: G3 done (non-zero IDs => GPU SMMU clocked and alive after CX power)\n");
+ }
+ 
++/* G4a: read-only dump of the GMU (graphics management unit) core registers, now that
++ * G2 has powered CX and clocked the cx_gmu rail. Only reads - no GMU firmware load, no
++ * reset toggle. Confirms the GMU register block answers (and at which offsets) before
++ * the real G4b/c/d writes. The key field is cm3_fw_init_result: 0 now (no fw loaded),
++ * and the target later is 0xbabeface. Mirrors HakiOS step_first_words. */
++static void
++sweet_gpu_g4a_gmu(void)
++{
++	printf("SWEET GPU: G4a read-only GMU probe (gmu @ 0x506a000)\n");
++	vm_offset_t g = ml_io_map(GMU_PA, GMU_SIZE);
++	printf("SWEET GPU: gmu cm3_sysreset=0x%08x cm3_boot_config=0x%08x cm3_fw_init_result=0x%08x cm3_cfg=0x%08x\n",
++	    rd(g, GMU_CM3_SYSRESET), rd(g, GMU_CM3_BOOT_CONFIG), rd(g, GMU_CM3_FW_INIT_RESULT), rd(g, GMU_CM3_CFG));
++	printf("SWEET GPU: gmu hfi_ctrl_status=0x%08x hfi_version=0x%08x general_7=0x%08x rpmh_power_state=0x%08x\n",
++	    rd(g, GMU_HFI_CTRL_STATUS), rd(g, GMU_HFI_VERSION_INFO), rd(g, GMU_GENERAL_7), rd(g, GMU_RPMH_POWER_STATE));
++	printf("SWEET GPU: gmu sptprac_pwr_clk=0x%08x ao_host_int=0x%08x ao_cx_busy=0x%08x rscc_ctrl_ack=0x%08x ahb_fence=0x%08x\n",
++	    rd(g, GMU_SPTPRAC_PWR_CLK_STATUS), rd(g, GMU_AO_HOST_INTERRUPT_STATUS), rd(g, GMU_AO_GPU_CX_BUSY_STATUS),
++	    rd(g, GMU_RSCC_CONTROL_ACK), rd(g, GMU_AHB_FENCE_STATUS));
++	printf("SWEET GPU: G4a done (GMU answers => ready for G4b fw load; fw_init_result target is 0xbabeface)\n");
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -247,6 +289,9 @@ SweetGPU::start(IOService *provider)
+ 	if (enabled >= 3) {
+ 		sweet_gpu_g3_smmu();
+ 	}
++	if (enabled >= 4) {
++		sweet_gpu_g4a_gmu();
++	}
+ 	return true;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

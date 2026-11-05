@@ -1,0 +1,125 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 1870828..0c678fc 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -13,6 +13,7 @@
+  *   sweetgpu>=3 G1+G2, then G3: read-only check the GPU SMMU is alive (patch 0105).
+  *   sweetgpu>=4 +G4a: read-only dump of the GMU core registers (patch 0107).
+  *   sweetgpu>=5 +G4b: load the GMU firmware into its TCM, core held in reset (patch 0108).
++ *   sweetgpu>=6 +G4c: boot the GMU (release reset, poll for 0xbabeface) (patch 0109).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -104,6 +105,27 @@ OSDefineMetaClassAndStructors(SweetGPU, IOService);
+ #define GMU_AHB_FENCE_STATUS            GMU_WORD(0x9313u)
+ #define GMU_ITCM                        GMU_WORD(0x0c00u) /* code+data TCM window (ITCM then DTCM, contiguous) */
+ #define GMU_DTCM_VERSIONS               GMU_WORD(0x1c00u + 0xff8u) /* firmware's version words, read back after load */
++/* G4c boot registers (a6xx_gmu_register_config/power_config/device_start; offsets word*4, from HakiOS) */
++#define GMU_ICACHE_CONFIG               GMU_WORD(0x4c00u)
++#define GMU_DCACHE_CONFIG               GMU_WORD(0x4c01u)
++#define GMU_SYS_BUS_CONFIG              GMU_WORD(0x4c0fu)
++#define GMU_PWR_COL_INTER_FRAME_CTRL    GMU_WORD(0x50c0u)
++#define GMU_RPMH_CTRL                   GMU_WORD(0x50e8u)
++#define GMU_RPMH_CTRL_ALL               0xf11u
++#define GMU_CX_FAL_INTF                 GMU_WORD(0x50f0u)
++#define GMU_CX_FALNEXT_INTF             GMU_WORD(0x50f1u)
++#define GMU_HFI_SFR_ADDR                GMU_WORD(0x5182u)
++#define GMU_GMU2HOST_INTR_CLR           GMU_WORD(0x5191u)
++#define GMU_GMU2HOST_INTR_INFO          GMU_WORD(0x5192u)
++#define GMU_RSCC_CONTROL_REQ            GMU_WORD(0x9307u)
++#define GMU_AHB_FENCE_RANGE_0           GMU_WORD(0x9311u)
++#define GMU_CHIP                        0x06018000u /* dt chipid 0x06010800 (a618), the way the fw wants it */
++#define GMU_STARTED_MASK                0x1ffu
++#define GMU_STARTED                     0x100u
++#define GMU_FAILED                      0xe00u
++/* GPU bus interface (GBIF), in the CX half: kgsl-3d0 @ 0x5000000 + word 0x3c00 (live.dts) */
++#define GBIF_PA                         0x0500f000u
++#define GBIF_HALT                       (4u * 0x45u)
+ 
+ static inline uint32_t
+ rd(vm_offset_t base, uint32_t off)
+@@ -307,6 +329,74 @@ sweet_gpu_g4b_load(void)
+ 	printf("SWEET GPU: G4b done - firmware loaded, core STILL IN RESET (G4c boots it). mismatches=0 => load good.\n");
+ }
+ 
++/* G4c: boot the GMU - wake its RPMh channel, write the register config, release the
++ * CM3 from reset, and poll cm3_fw_init_result for 0xbabeface / GMU_STARTED. This is
++ * the MINIMAL boot: no HFI/log memory (the GMU SMMU space is G4d), so the firmware
++ * may stall short of "started" if it needs them - that is informative and recoverable
++ * (the GMU is a separate core; a failed boot leaves fw_init_result low, the apps CPU
++ * runs on, a reboot restores it). Sequence mirrors HakiOS step_gmu_start / mainline
++ * a6xx_gmu_fw_start, dropping the HFI table + log + the separate RSCC DRV0 reads
++ * (surya has no separate RSCC mapping). Only GMU-AO registers are read after release. */
++static void
++sweet_gpu_g4c_boot(void)
++{
++	vm_offset_t g = ml_io_map(GMU_PA, GMU_SIZE);
++	if (rd(g, GMU_CM3_SYSRESET) != 1) {
++		printf("SWEET GPU: G4c core not held in reset - run sweetgpu>=5 so G4b loads the firmware first; abort\n");
++		return;
++	}
++	printf("SWEET GPU: G4c boot the GMU (RSCC wake + config + release reset; chasing 0xbabeface)\n");
++
++	/* wake the GMU's RPMh channel (GMU-side handshake only; surya has no separate RSCC block) */
++	wr(g, GMU_RSCC_CONTROL_REQ, 2);
++	uint32_t ack = 0;
++	for (int i = 0; i < 200; i++) {
++		ack = rd(g, GMU_RSCC_CONTROL_ACK);
++		if (ack == 2) { break; }
++		IODelay(100);
++	}
++	printf("SWEET GPU: G4c rscc_control_ack=0x%08x\n", ack);
++	wr(g, GMU_RSCC_CONTROL_REQ, 0);
++
++	/* register config (minus HFI/log memory) */
++	wr(g, GMU_CX_FALNEXT_INTF, 1);
++	wr(g, GMU_CX_FAL_INTF, 1);
++	wr(g, GMU_GENERAL_7, 1);
++	wr(g, GMU_CM3_FW_INIT_RESULT, 0);
++	wr(g, GMU_CM3_BOOT_CONFIG, 2);
++	wr(g, GMU_AHB_FENCE_RANGE_0, (1u << 31) | ((0xau << 2) << 18) | 0x8a0u);
++	wr(g, GMU_CM3_CFG, 0x4052u);
++	vm_offset_t bif = ml_io_map(GBIF_PA, 0x1000);
++	wr(bif, GBIF_HALT, 0);
++	wr(g, GMU_HFI_SFR_ADDR, GMU_CHIP);
++	wr(g, GMU_SYS_BUS_CONFIG, 1);
++	wr(g, GMU_ICACHE_CONFIG, 1);
++	wr(g, GMU_DCACHE_CONFIG, 1);
++	wr(g, GMU_PWR_COL_INTER_FRAME_CTRL, 0x9c40400u);
++	wr(g, GMU_RPMH_CTRL, rd(g, GMU_RPMH_CTRL) | GMU_RPMH_CTRL_ALL);
++	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
++
++	/* let the processor run */
++	wr(g, GMU_CM3_SYSRESET, 0);
++	uint32_t r = 0;
++	for (int i = 0; i < 5000; i++) {
++		r = rd(g, GMU_CM3_FW_INIT_RESULT);
++		if ((r & GMU_STARTED_MASK) == GMU_STARTED || r == 0xbabefaceu || (r & GMU_FAILED) != 0) {
++			break;
++		}
++		IODelay(100);
++	}
++	printf("SWEET GPU: G4c cm3_fw_init_result=0x%08x\n", r);
++	printf("SWEET GPU: G4c post gmu2host_intr=0x%08x ao_host_int=0x%08x hfi_ctrl=0x%08x sptprac_pwr_clk=0x%08x\n",
++	    rd(g, GMU_GMU2HOST_INTR_INFO), rd(g, GMU_AO_HOST_INTERRUPT_STATUS), rd(g, GMU_HFI_CTRL_STATUS),
++	    rd(g, GMU_SPTPRAC_PWR_CLK_STATUS));
++	if ((r & GMU_STARTED_MASK) == GMU_STARTED || r == 0xbabefaceu) {
++		printf("SWEET GPU: G4c *** THE GMU FIRMWARE IS RUNNING (0x%08x) *** GPU microcontroller is alive!\n", r);
++	} else {
++		printf("SWEET GPU: G4c GMU did not start (0x%08x) - recoverable, reboot. Next: G4d (HFI/log memory + PDC).\n", r);
++	}
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -354,6 +444,9 @@ SweetGPU::start(IOService *provider)
+ 	if (enabled >= 5) {
+ 		sweet_gpu_g4b_load();
+ 	}
++	if (enabled >= 6) {
++		sweet_gpu_g4c_boot();
++	}
+ 	return true;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

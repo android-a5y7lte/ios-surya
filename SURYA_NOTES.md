@@ -1177,6 +1177,36 @@ CONFIRMED the legacy flat format (not a650 blocks). NEXT: G4c = release reset + 
 cm3_fw_init_result for 0xbabeface (the GMU firmware booting). Build from HakiOS hakios.adreno.c step 15
 (start the GMU) + the RSCC wake (~line 1930). This is the riskiest write step (can hang) - mirror carefully.
 
+### G4c result (2026-11-05, log ring): *** GMU FIRMWARE RUNNING (0xbabeface) *** MILESTONE
+sweetgpu=6, patch 0109. The minimal boot WORKED on the first hardware run and did NOT hang - the phone
+reached the iOS lock screen. Log ring (flush #21, 289620 bytes):
+  "G4c rscc_control_ack=0x00000000 / G4c cm3_fw_init_result=0xbabeface /
+   G4c post gmu2host_intr=0 ao_host_int=0 hfi_ctrl=0 sptprac_pwr_clk=0xd4 /
+   G4c *** THE GMU FIRMWARE IS RUNNING (0xbabeface) *** GPU microcontroller is alive!"
+=> The Adreno 618 GMU (Cortex-M3) booted its firmware on bare XNU. Full chain now verified end-to-end on
+HW: G2 CX power -> G3 SMMU alive -> G4a GMU regs -> G4b fw load (mismatches=0) -> G4c CM3 boot (0xbabeface).
+Matches the point HakiOS reached on SM7325, independently reproduced on SM7150/surya. The minimal recipe was
+enough (no HFI queue, no PDC/RSCC ucode, no GMU SMMU) - FW_INIT fires before HFI, as the mainline comment says.
+NOTE rscc_control_ack read 0 (surya has no separate RSCC mapping; the wake still took - fw_init proves it).
+HONEST SCOPE: this is the *Qualcomm* GPU bring-up. It does NOT give iOS Metal - AGXAccelerator is Apple-GPU
+only, so the app blocker "GPU=AGXAccelerator->none" is untouched by this. Value: a real, verified Adreno GMU
+bring-up on XNU; a foundation for Mesa/GLES later (HakiOS's path) rather than Metal.
+
+### LOG-RING PULL GOTCHA (2026-11-05): `adb exec-out` can return 0 bytes
+sweet-log-pull.sh uses `adb exec-out "dd ..."`. On this recovery/adbd it returned 0 bytes (blockdev size OK,
+root OK, a direct `dd count=1` read OK - so NOT perms/empty ring). Workaround that always works: dd to a file
+on the device then `adb pull` (binary-safe):
+  adb shell "dd if=/dev/block/sda16 bs=4096 skip=$SKIP count=1025 of=/tmp/ring.bin 2>/dev/null"
+  adb pull /tmp/ring.bin OUT.bin ; python3 tools/sweet-log.py OUT.bin OUT.txt
+(SKIP = partition_blocks - 1025.) TODO: make sweet-log-pull.sh fall back to this when exec-out yields 0.
+
+### G4d plan (NEXT): HFI - let the kernel talk to the running GMU
+Now the GMU runs, the next real step is HFI (Host-Firmware Interface): the message channel the kernel uses to
+ask the GMU to power the GX domain, set GPU freq (DCVS), and eventually accept CP submissions. Needs: a GMU
+SMMU context bank + a DMA buffer mapped into GMU IOVA space for the HFI queue table; HFI_QTBL_ADDR/INFO; then
+HFI_CTRL_INIT=1 and poll HFI_CTRL_STATUS bit0. Reference: hakios.adreno.c step_gmu_queues/HFI (~line 2000+).
+After HFI: GX rail on via GMU, load a630_sqe.fw into the CP/SQE, ringbuffer, first submit. All Qualcomm-level.
+
 ### G4 plan: GMU firmware load + boot (recipe from mainline a6xx_gmu.c, 2026-11-05)
 G4 wakes the GMU microcontroller - the real "turn the GPU on". It does NOT need the PMIC rails (runs on the
 CX GDSC we already power in G2). Boot recipe (mainline a6xx_gmu_fw_start/_start, cold boot, legacy a630/a615):

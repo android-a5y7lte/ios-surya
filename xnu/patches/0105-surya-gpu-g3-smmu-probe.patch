@@ -1,0 +1,62 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 3e98471..831d90e 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -10,6 +10,7 @@
+  *
+  *   sweetgpu=1  read only, logged "SWEET GPU: ..." (G1).
+  *   sweetgpu>=2 G1, then G2: power the CX domain on and clock the GMU rail.
++ *   sweetgpu>=3 G1+G2, then G3: read-only check the GPU SMMU is alive (patch 0105).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -66,6 +67,17 @@ OSDefineMetaClassAndStructors(SweetGPU, IOService);
+  * CFG = src<<8 | hid_div = (6<<8) | 2 = 0x602 (matches gpucc-sc7180.c ftbl). */
+ #define GMU_CFG_200MHZ                  0x00000602u
+ 
++/* GPU SMMU (qcom,smmu-v2 @ 0x5040000, live.dts). ARM SMMU-v2 GR0 register
++ * offsets (Linux drivers/iommu/arm/arm-smmu/arm-smmu.h). Read-only in G3. */
++#define GPU_SMMU_PA                     0x05040000u
++#define GPU_SMMU_SIZE                   0x00010000u
++#define SMMU_sCR0                       0x0000u
++#define SMMU_ID0                        0x0020u
++#define SMMU_ID1                        0x0024u
++#define SMMU_ID2                        0x0028u
++#define SMMU_ID7                        0x003cu
++#define SMMU_sGFSR                      0x0048u
++
+ static inline uint32_t
+ rd(vm_offset_t base, uint32_t off)
+ {
+@@ -179,6 +191,21 @@ sweet_gpu_g2(vm_offset_t gcc)
+ 	printf("SWEET GPU: G2 done - CX powered, GMU rail clocked (GX still off, as intended)\n");
+ }
+ 
++/* G3: read-only check that the GPU SMMU is clocked and alive now that CX is
++ * powered (G2). Only reads the SMMU-v2 GR0 identification registers - no config
++ * is written. Non-zero IDs mean the GPU's memory unit is reachable, which is the
++ * prerequisite for the GMU's HFI buffers (G4). Run after G2 so the GPU bus is up. */
++static void
++sweet_gpu_g3_smmu(void)
++{
++	printf("SWEET GPU: G3 read-only GPU SMMU probe (smmu-v2 @ 0x5040000)\n");
++	vm_offset_t s = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
++	printf("SWEET GPU: smmu sCR0=0x%08x ID0=0x%08x ID1=0x%08x ID2=0x%08x ID7=0x%08x sGFSR=0x%08x\n",
++	    rd(s, SMMU_sCR0), rd(s, SMMU_ID0), rd(s, SMMU_ID1), rd(s, SMMU_ID2),
++	    rd(s, SMMU_ID7), rd(s, SMMU_sGFSR));
++	printf("SWEET GPU: G3 done (non-zero IDs => GPU SMMU clocked and alive after CX power)\n");
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -217,6 +244,9 @@ SweetGPU::start(IOService *provider)
+ 	if (enabled >= 2) {
+ 		sweet_gpu_g2(gcc);
+ 	}
++	if (enabled >= 3) {
++		sweet_gpu_g3_smmu();
++	}
+ 	return true;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

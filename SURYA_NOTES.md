@@ -1155,6 +1155,18 @@ TESTED 2026-11-05 (log ring, build 42067534837):
     APID table): direct-SPMI rail-enable is likely OUT; powering cam/BT rails needs the RPMh path (RSC/TCS +
     cmd-db). IMPORTANT: the GPU track does NOT need these rails (GMU runs on the CX GDSC we already power), so
     GPU G4 can proceed independently.
+### G4a result (2026-11-05, log ring): GMU core block ALIVE
+sweetgpu=4 after G2/G3. GMU @0x506a000 (offsets word*4, from HakiOS - CORRECT for SM7150):
+  cm3_sysreset=0x1 (core held in reset, expected - nothing booted it), cm3_boot_config=0, cm3_fw_init_result=0
+  (target 0xbabeface), cm3_cfg=0x52, hfi_ctrl_status/version=0, general_7=0, rpmh_power_state=0xf,
+  sptprac_pwr_clk=0xd4 (GX core unpowered/unclocked, expected), ao_cx_busy=0x30000000, rscc_ctrl_ack=0,
+  ahb_fence=0. Sane/varied => GMU register block answers at our offsets. Whole GPU chain verified on HW:
+  power(G2) -> bus/SMMU(G3) -> GMU regs(G4a). Ready for G4b-d: load a630_gmu.bin + RSCC wake + boot -> 0xbabeface.
+FIRMWARE DELIVERY for G4b: a630_gmu.bin (32K, have it in research/fw/) must reach the kernel - deliver as an
+  ADT blob like TouchFW (see mkpayload.py blobs + how the touch driver reads TouchFW), and SweetGPU reads it
+  from the ADT, then copies it word-by-word into GMU_ITCM (word 0x0c00). HakiOS hakios.adreno.c has the full
+  load + RSCC-wake + CM3-boot sequence to mirror.
+
 ### G4 plan: GMU firmware load + boot (recipe from mainline a6xx_gmu.c, 2026-11-05)
 G4 wakes the GMU microcontroller - the real "turn the GPU on". It does NOT need the PMIC rails (runs on the
 CX GDSC we already power in G2). Boot recipe (mainline a6xx_gmu_fw_start/_start, cold boot, legacy a630/a615):

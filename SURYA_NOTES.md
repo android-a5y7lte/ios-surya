@@ -1310,7 +1310,27 @@ If the GMU does NOT reach babeface with HFI configured (but did at G4c minimal):
 HFI table layout is off; compare register-by-register with the working G4c path + HakiOS. The fsr=0x400
 on the context is still unexplained (benign so far); watch it once the GMU DMAs the HFI table.
 
-### G4d-c-old plan (superseded by 0114): HFI handshake - fill the queue table + ring the GMU
+### G4d-c LIVE (2026-11-06, patch 0114, sweetgpu=9, CI 42298084728): *** GMU BOOTED WITH HFI CONFIGURED ***
+Reproducible from the dump: smr=0x80000005 (ctx re-live), hfi table @ 0x60006000 with 3 queues
+(q0=0x60006350 q1=0x60007350 q2=0x60008350), **cm3_fw_init_result=0xbabeface** AFTER releasing the core
+with HFI/log/SFR all pre-configured. The firmware accepted every pre-boot HFI value we wrote - it did
+not fail init, did not reject the table address. hfi_ctrl_status=0 and hfi_version=0 are EXPECTED here:
+the GMU only populates those after we write HFI_CTRL_INIT=1 and it processes the table. gmu2host_intr=0
+confirms no message yet from GMU. Observation (minor): rscc_control_ack=0 (same as G4c minimal boot); the
+firmware boots anyway on this SoC - mark for later, not a blocker.
+
+### G4d-d plan (NEXT): ring HFI_CTRL_INIT and see the GMU answer
+Now the GMU has the table but hasn't been asked to use it. Smaller than G4d-c. Sequence:
+  1. Write GMU_HFI_CTRL_INIT = 1 (word 0x5186).
+  2. Poll HFI_CTRL_STATUS bit 0 ("hfi active"), ~100 ms. HFI_VERSION_INFO becomes meaningful.
+  3. Read GMU2HOST_INTR_INFO for an init-complete message; if set, look at queue 1 (gmu->host) via the
+     block_uncached view of the HFI region - the GMU writes directly to iova 0x60007000, we read the
+     same physical pages uncached.
+  4. On success print *** HFI IS ALIVE ***; next after would be sending the first F2H message (e.g.
+     a vote-level set) through queue 0, which exercises interrupts and the DCVS path.
+Reference: hakios step after step_gmu_start (step_hfi / step_gmu_queues) + vendor a6xx_hfi.c.
+Buffer layout already correct (G4d-c maps 4 HFI pages = 16K, matching 3 queues x 4K); sweet_gpu_g4d_hfi()
+is the right insertion point - add CTRL_INIT after the babeface wait, OR make a new sweetgpu>=10 stage.
 Now the context is live: in the mapped HFI page (gmu_hfi, iova 0x60006000, block_uncached view), build the
 hfi_table (words, queue_words, queues=active=3, 3 hfi_queue entries at GMU_HFI_ADDRESS+HFI_QUEUE_AT(i),
 priorities {10,10,40}, read/write index 0, words 1024). Then by GMU regs: HFI_QTBL_ADDR=0x60006000,

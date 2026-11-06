@@ -1212,6 +1212,28 @@ num_smr=5. PENDING HW TEST: build sweetgpu=7, boot variant 5, pull ring, read th
 NEXT after the probe tells us the layout: G4d-b (set up/confirm the GMU context bank + map a DMA buffer), then
 G4d-c (HFI queue table + HFI handshake).
 
+### G4d-a result #1 (2026-11-06, patch 0110): HANG on first SMR read -> found the missing SMMU clock vote
+sweetgpu=7 re-ran the whole chain; G4c re-hit 0xbabeface (GMU boot reproducible). G4d-a printed its header +
+"geom pgshift=12 numpage=8 gr1=0x1000 cb_base=0x8000 num_cb=5 num_smr=5 scr0=0x00200626" (EXACTLY the predicted
+layout) then execution vanished - no smr[]/cb[]/done lines, boot continued straight into iOS userland (SiriTTS
+crashes, tether route, lock screen). Since the "done" printf never fired yet the phone booted, the probe HUNG on
+the first stream-match read (GR0+0x800) on one core; cpus=6 so the others booted on. Diagnosis via HakiOS
+hakios.adreno.c: (1) the SMMU stream table + context-bank register pages are DARK until the SMMU clock is voted
+on - GPUCC gpu_cc_hlos1_vote_gpu_smmu_clk @ 0x5000 (gpucc-sc7180.c). Our G2 never voted it; only the always-on
+ID block 0x0-0x48 answers (why G3 worked, 0110 hung). (2) Those regs are the hypervisor's emulation, which only
+handles the plain "ldr w,[x]" load form (HakiOS header note: a store of the zero reg "goes horribly wrong"); a
+compiler-chosen addressing mode can hang. HakiOS smmu reads use explicit inline-asm ldr. CONFIRMED from HakiOS:
+GPU SMMU = qcom,qsmmu-v500 (MMU-500) with qcom,skip-init; streams: 0 GPU, 1 lp-twin, 2 secure, 5 GMU.
+
+### G4d-a result #2 PENDING (patch 0111, sweetgpu=7): vote SMMU clock + hypervisor-safe reads
+Fix on top of 0110: (a) ml_io_map GPUCC and branch_on(cc,"smmu vote",0x5000) at the top of the probe; (b) new
+smmu_rd() helper does every SMMU access via asm `ldr %w0,[%1]` (noinline); (c) "about to read ..." markers
+before the SMR loop and the CB loop so any residual hang is pinpointed to a region. Reconstructed+clang-checked
+(aarch64 asm OK), git apply --check clean on 0110. EXPECT now: branch "smmu vote" on, then smr[0..4] (look for
+the valid SMR whose id=5 => the GMU's stream -> its cbndx) and cb[0..4] (an M=1 CB with non-zero ttbr0 = a live
+context). If it STILL hangs after the vote, the last "about to read" line localizes it and we go secure-path
+(SCM). TEST: build sweetgpu=7, boot variant 5 to lock screen, pull ring, grep -aE "G4d-a".
+
 ### G4d plan (NEXT): HFI - let the kernel talk to the running GMU
 Now the GMU runs, the next real step is HFI (Host-Firmware Interface): the message channel the kernel uses to
 ask the GMU to power the GX domain, set GPU freq (DCVS), and eventually accept CP submissions. Needs: a GMU

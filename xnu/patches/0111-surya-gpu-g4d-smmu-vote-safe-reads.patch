@@ -1,0 +1,117 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index bf210a6..96483bb 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -136,6 +136,12 @@ OSDefineMetaClassAndStructors(SweetGPU, IOService);
+ #define SMMU_CB_TTBR0_HI                0x0024u
+ #define SMMU_CB_TCR                     0x0030u
+ #define SMMU_CB_FSR                     0x0058u
++/* GPUCC branch that votes the GPU SMMU's clock on (gpu_cc_hlos1_vote_gpu_smmu_clk,
++ * gpucc-sc7180.c enable_reg 0x5000). Without this vote the SMMU's stream table and
++ * context-bank register pages are unclocked and a read to them HANGS the access -
++ * only the always-on ID block (0x0-0x48, read in G3) answers. HakiOS votes it in
++ * step_clocks before reading the SMMU. GPUCC_PA+0x5000 is inside the mapped 0x9000. */
++#define GPUCC_SMMU_VOTE_CBCR            0x5000u
+ 
+ static inline uint32_t
+ rd(vm_offset_t base, uint32_t off)
+@@ -150,6 +156,21 @@ wr(vm_offset_t base, uint32_t off, uint32_t val)
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ }
+ 
++/* The GPU SMMU's stream table and context-bank registers are not real hardware
++ * under Qualcomm's hypervisor - the access traps and is emulated, which "works for
++ * the simplest instruction forms only" (HakiOS). A compiler-chosen register-offset
++ * load can make the emulation go wrong. So force the plain "ldr w,[x]" form for
++ * every SMMU access, exactly as HakiOS's rd() does. noinline so it is never folded
++ * into an addressing mode the hypervisor won't emulate. */
++static uint32_t __attribute__((noinline))
++smmu_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v;
++	vm_offset_t a = base + off;
++	__asm__ volatile ("ldr %w0, [%1]" : "=r" (v) : "r" (a) : "memory");
++	return v;
++}
++
+ /* poll off until (read & mask) == want, up to ~5 ms; returns the match and the
+  * last value read. */
+ static bool
+@@ -410,18 +431,33 @@ sweet_gpu_g4c_boot(void)
+ /* G4d-a: read-only probe of the GPU SMMU's context banks, to learn how the GMU's
+  * translation context is (or is not) set up before we touch any TTBR in G4d-b.
+  * The GMU reaches its HFI/log buffers in DRAM through this same ARM SMMU-v2 on
+- * its own stream ID -> context bank. This dumps the stream-match table (which SID
++ * its own stream ID -> context bank. It dumps the stream-match table (which SID
+  * maps to which CB) and every context bank's SCTLR/TTBR0/TCR/FSR, so we can see
+  * whether a CB is already enabled (M bit) with a live pagetable - i.e. did the
+- * boot loader set the GMU up for us - and which CB index it uses. Pure reads
+- * inside the already-mapped 0x10000 SMMU register window: safe, like G3. */
++ * boot loader set the GMU up for us - and which CB index it uses.
++ *
++ * Two things the first G4d-a try (patch 0110) got wrong, both learned from HakiOS:
++ *  1. The stream table + context-bank register pages are DARK until the SMMU clock
++ *     is voted on (GPUCC gpu_cc_hlos1_vote_gpu_smmu_clk @ 0x5000). Reading them
++ *     without the vote HANGS (only the always-on 0x0-0x48 ID block answers - which
++ *     is why G3 worked and 0110 hung on the first SMR read at 0x800). So vote it
++ *     first, here, via the GPUCC branch.
++ *  2. Those registers are the hypervisor's emulation, which only handles the plain
++ *     "ldr w,[x]" load form - so read them through smmu_rd(), never the compiler's
++ *     choice. "about to read ..." markers before each region pinpoint any residual
++ *     hang (the probe runs on one core; the rest still boots, so the ring flushes). */
+ static void
+ sweet_gpu_g4d_smmu_probe(void)
+ {
+ 	printf("SWEET GPU: G4d-a read-only GMU SMMU context-bank probe (smmu-v2 @ 0x5040000)\n");
++
++	/* vote the SMMU's clock on first, or the stream/CB register pages hang (see above) */
++	vm_offset_t cc = ml_io_map(GPUCC_PA, GPUCC_SIZE);
++	branch_on(cc, "smmu vote", GPUCC_SMMU_VOTE_CBCR);
++
+ 	vm_offset_t s = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
+-	uint32_t id0 = rd(s, SMMU_ID0);
+-	uint32_t id1 = rd(s, SMMU_ID1);
++	uint32_t id0 = smmu_rd(s, SMMU_ID0);
++	uint32_t id1 = smmu_rd(s, SMMU_ID1);
+ 	uint32_t pgshift = (id1 & (1u << 31)) ? 16u : 12u;
+ 	uint32_t numpage = 1u << (((id1 >> 28) & 7u) + 1u);
+ 	uint32_t num_cb  = id1 & 0xffu;                  /* ID1 NUMCB */
+@@ -430,12 +466,13 @@ sweet_gpu_g4d_smmu_probe(void)
+ 	uint32_t cbbase  = numpage << pgshift;           /* first context-bank reg page */
+ 	uint32_t pgsize  = 1u << pgshift;
+ 	printf("SWEET GPU: G4d-a geom pgshift=%u numpage=%u gr1=0x%x cb_base=0x%x num_cb=%u num_smr=%u scr0=0x%08x\n",
+-	    pgshift, numpage, gr1, cbbase, num_cb, num_smr, rd(s, SMMU_sCR0));
++	    pgshift, numpage, gr1, cbbase, num_cb, num_smr, smmu_rd(s, SMMU_sCR0));
+ 
+ 	/* stream-match table: which stream ID (the GMU's) lands in which context bank */
++	printf("SWEET GPU: G4d-a about to read the stream table (SMR/S2CR @ 0x800/0xc00)\n");
+ 	for (uint32_t i = 0; i < num_smr && i < 64u; i++) {
+-		uint32_t smr  = rd(s, SMMU_SMR0 + 4u * i);
+-		uint32_t s2cr = rd(s, SMMU_S2CR0 + 4u * i);
++		uint32_t smr  = smmu_rd(s, SMMU_SMR0 + 4u * i);
++		uint32_t s2cr = smmu_rd(s, SMMU_S2CR0 + 4u * i);
+ 		printf("SWEET GPU: G4d-a smr[%u]=0x%08x (valid=%u id=0x%04x mask=0x%04x) s2cr=0x%08x (type=%u cbndx=%u)\n",
+ 		    i, smr, (smr >> 31) & 1u, smr & 0xffffu, (smr >> 16) & 0x7fffu,
+ 		    s2cr, (s2cr >> 16) & 3u, s2cr & 0xffu);
+@@ -448,14 +485,15 @@ sweet_gpu_g4d_smmu_probe(void)
+ 		    num_cb, maxcb, GPU_SMMU_SIZE);
+ 		num_cb = maxcb;
+ 	}
++	printf("SWEET GPU: G4d-a about to read the context banks (CBAR @ gr1, CB regs @ cb_base)\n");
+ 	for (uint32_t i = 0; i < num_cb && i < 64u; i++) {
+-		uint32_t cbar  = rd(s, gr1 + 4u * i);
++		uint32_t cbar  = smmu_rd(s, gr1 + 4u * i);
+ 		vm_offset_t cb = s + cbbase + (vm_offset_t)i * pgsize;
+-		uint32_t sctlr = rd(cb, SMMU_CB_SCTLR);
+-		uint32_t t_lo  = rd(cb, SMMU_CB_TTBR0_LO);
+-		uint32_t t_hi  = rd(cb, SMMU_CB_TTBR0_HI);
+-		uint32_t tcr   = rd(cb, SMMU_CB_TCR);
+-		uint32_t fsr   = rd(cb, SMMU_CB_FSR);
++		uint32_t sctlr = smmu_rd(cb, SMMU_CB_SCTLR);
++		uint32_t t_lo  = smmu_rd(cb, SMMU_CB_TTBR0_LO);
++		uint32_t t_hi  = smmu_rd(cb, SMMU_CB_TTBR0_HI);
++		uint32_t tcr   = smmu_rd(cb, SMMU_CB_TCR);
++		uint32_t fsr   = smmu_rd(cb, SMMU_CB_FSR);
+ 		printf("SWEET GPU: G4d-a cb[%u] cbar=0x%08x sctlr=0x%08x (M=%u) ttbr0=0x%08x%08x tcr=0x%08x fsr=0x%08x\n",
+ 		    i, cbar, sctlr, sctlr & 1u, t_hi, t_lo, tcr, fsr);
+ 	}

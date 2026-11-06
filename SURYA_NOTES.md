@@ -1277,6 +1277,27 @@ DT-grounded. If mask 0 STILL reads back 0, the SMR is TZ-owned after all and we 
 which SMR slot TZ reserved; but no-skip-init + kgsl-manages-it strongly implies HLOS may write it.
 EXPECT next: readback smr=0x80000005, "*** GMU SMMU CONTEXT IS LIVE ***".
 
+### G4d-b LIVE (2026-11-06, patch 0113, sweetgpu=8, CI 42294123985): *** GMU SMMU CONTEXT IS LIVE ***
+Mask-0 fix worked. Readback: smr=0x80000005 (valid|sid5, mask0 - TOOK), s2cr=0x1 (translate->ctx1),
+cbar=0x1f300, sctlr=0x1027 M=1, ttbr0=0x1000104028000. No hang, no fault. The GMU now has a working
+stage-1 translation context backed by our 3-level page tables, with the dummy/log/HFI buffers mapped at
+0x60000000/0x60002000/0x60006000. fsr=0x400 persists but is a benign status bit (not in the fault mask;
+context works). CONFIRMED: surya's GPU SMMU (qcom,smmu-v2, no skip-init) IS HLOS-writable incl. the SMR -
+no secure path needed. This is the foundation HFI needs.
+NOTE for G4d-c: G4d-b runs AFTER G4c (GMU already booted at babeface) and the context still programs fine;
+but the GMU booted WITHOUT this context, so verify whether HFI works with an after-the-fact context or
+whether the whole thing must be set up pre-boot (reorder G4d-b before G4c). fsr=0x400: decode before HFI
+(bit10) in case it means something once the GMU DMAs.
+
+### G4d-c plan (NEXT): HFI handshake - fill the queue table + ring the GMU
+Now the context is live: in the mapped HFI page (gmu_hfi, iova 0x60006000, block_uncached view), build the
+hfi_table (words, queue_words, queues=active=3, 3 hfi_queue entries at GMU_HFI_ADDRESS+HFI_QUEUE_AT(i),
+priorities {10,10,40}, read/write index 0, words 1024). Then by GMU regs: HFI_QTBL_ADDR=0x60006000,
+HFI_QTBL_INFO=1, HFI_SFR_ADDR=GMU_CHIP, HFI_CTRL_INIT=1, poll HFI_CTRL_STATUS bit0. Reference hakios.adreno.c
+step_gmu_start (~line 1905) + the hfi_table/hfi_queue structs (~1887). Offsets already in file: GMU_HFI_
+CTRL_STATUS 0x5180, +SFR_ADDR 0x5182, QTBL_INFO 0x5184, QTBL_ADDR 0x5185, CTRL_INIT 0x5186. block_uncached
+needs ml_io_map_wcomb (already externed) on the hfi buffer's phys. Likely sweetgpu>=9.
+
 ### G4d plan (NEXT): HFI - let the kernel talk to the running GMU
 Now the GMU runs, the next real step is HFI (Host-Firmware Interface): the message channel the kernel uses to
 ask the GMU to power the GX domain, set GPU freq (DCVS), and eventually accept CP submissions. Needs: a GMU

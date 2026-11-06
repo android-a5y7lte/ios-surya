@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
-index 96483bb..2b89a91 100644
+index 96483bb..44d8b13 100644
 --- a/iokit/Kernel/arm/SweetGPU.cpp
 +++ b/iokit/Kernel/arm/SweetGPU.cpp
 @@ -15,6 +15,7 @@
@@ -41,7 +41,7 @@ index 96483bb..2b89a91 100644
  /* poll off until (read & mask) == want, up to ~5 ms; returns the match and the
   * last value read. */
  static bool
-@@ -500,6 +515,175 @@ sweet_gpu_g4d_smmu_probe(void)
+@@ -500,6 +515,176 @@ sweet_gpu_g4d_smmu_probe(void)
  	printf("SWEET GPU: G4d-a done - an enabled CB (M=1) with a non-zero ttbr0 is a live context (the GMU's, if ABL set it up)\n");
  }
  
@@ -132,13 +132,14 @@ index 96483bb..2b89a91 100644
 +	vm_offset_t cb   = s + (numpage << pgshift) + (vm_offset_t)GMU_CTX * pgsize; /* context bank 1 regs */
 +
 +	/* three 4K page tables (fit in one CPU page) + seven 4K GMU buffer pages, zeroed */
-+	kr = kmem_alloc(kernel_map, &tables, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
++	kr = kmem_alloc(kernel_map, &tables, PAGE_SIZE, (kma_flags_t)(KMA_KOBJECT | KMA_ZERO | KMA_DATA),
++	    VM_KERN_MEMORY_IOKIT);
 +	if (kr != KERN_SUCCESS) {
 +		printf("SWEET GPU: G4d-b no memory for page tables (%d) - abort\n", kr);
 +		return;
 +	}
 +	kr = kmem_alloc(kernel_map, &buffers, round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE),
-+	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
++	    (kma_flags_t)(KMA_KOBJECT | KMA_ZERO | KMA_DATA), VM_KERN_MEMORY_IOKIT);
 +	if (kr != KERN_SUCCESS) {
 +		printf("SWEET GPU: G4d-b no memory for GMU buffers (%d) - abort\n", kr);
 +		return;
@@ -217,7 +218,7 @@ index 96483bb..2b89a91 100644
  bool
  SweetGPU::start(IOService *provider)
  {
-@@ -553,6 +737,9 @@ SweetGPU::start(IOService *provider)
+@@ -553,6 +738,9 @@ SweetGPU::start(IOService *provider)
  	if (enabled >= 7) {
  		sweet_gpu_g4d_smmu_probe();
  	}

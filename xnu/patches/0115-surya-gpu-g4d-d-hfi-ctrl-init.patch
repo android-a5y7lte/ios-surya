@@ -1,0 +1,68 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 5906ce2..9e5de18 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -18,6 +18,7 @@
+  *   sweetgpu>=8 +G4d-b: build the GMU's SMMU context + map its HFI buffers (patch 0112).
+  *   sweetgpu>=9  G4d-c: context + HFI message table + configured GMU boot (patch 0114).
+  *               (>=9 runs G4d-c INSTEAD of the minimal G4c boot - HFI must be set pre-boot.)
++ *   sweetgpu>=10 +G4d-d: ring HFI_CTRL_INIT and watch the GMU bring HFI up (patch 0115).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -717,7 +718,7 @@ sweet_gpu_g4d_setup(void)
+  * from G4b. Writing HFI_CTRL_INIT and exchanging messages is the next step (G4d-d).
+  * Sequence: HakiOS step_gmu_start / vendor a6xx_gmu_fw_start. */
+ static void
+-sweet_gpu_g4d_hfi(void)
++sweet_gpu_g4d_hfi(bool do_ctrl_init)
+ {
+ 	vm_offset_t buffers = 0;
+ 	vm_offset_t g = ml_io_map(GMU_PA, GMU_SIZE);
+@@ -799,6 +800,37 @@ sweet_gpu_g4d_hfi(void)
+ 		    r, hfi_ver);
+ 	} else {
+ 		printf("SWEET GPU: G4d-c GMU did not start with HFI (0x%08x) - recoverable, reboot. Compare against the G4c minimal boot.\n", r);
++		return;
++	}
++
++	/* G4d-d: ring HFI_CTRL_INIT and watch the GMU answer. The firmware's init puts the
++	 * table it was given into use only after CTRL_INIT is 1; it then populates
++	 * HFI_CTRL_STATUS (bit 0 = HFI active) and HFI_VERSION_INFO. A message may land on
++	 * GMU2HOST_INTR_INFO too. Vendor a6xx_hfi.c calls this "hfi start"; HakiOS reaches
++	 * the same state through a brief waitlet after step_gmu_start. Clear the host-side
++	 * interrupt latch first so a fresh event shows plainly. */
++	if (!do_ctrl_init) {
++		return;
++	}
++	printf("SWEET GPU: G4d-d ring HFI_CTRL_INIT=1 and watch the GMU answer\n");
++	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
++	wr(g, GMU_HFI_CTRL_INIT, 1);
++	uint32_t s2 = 0;
++	for (int i = 0; i < 1000; i++) {
++		s2 = rd(g, GMU_HFI_CTRL_STATUS);
++		if (s2 & 1u) { break; }
++		IODelay(100);
++	}
++	uint32_t v2   = rd(g, GMU_HFI_VERSION_INFO);
++	uint32_t in2  = rd(g, GMU_GMU2HOST_INTR_INFO);
++	uint32_t fw2  = rd(g, GMU_CM3_FW_INIT_RESULT);
++	printf("SWEET GPU: G4d-d hfi_ctrl_status=0x%08x hfi_version=0x%08x gmu2host_intr=0x%08x fw=0x%08x\n",
++	    s2, v2, in2, fw2);
++	if (s2 & 1u) {
++		printf("SWEET GPU: G4d-d *** HFI IS ALIVE *** (version 0x%08x, intr 0x%08x). Next: look at queue 1 (gmu->host) and send a F2H message.\n",
++		    v2, in2);
++	} else {
++		printf("SWEET GPU: G4d-d HFI did not come up after CTRL_INIT - recoverable, reboot. Likely: table layout or queue descriptors. Compare queue addresses vs what HFI firmware expects.\n");
+ 	}
+ }
+ 
+@@ -859,7 +891,7 @@ SweetGPU::start(IOService *provider)
+ 		sweet_gpu_g4d_setup();          /* standalone context test */
+ 	}
+ 	if (enabled >= 9) {
+-		sweet_gpu_g4d_hfi();            /* context + HFI table + configured boot */
++		sweet_gpu_g4d_hfi(enabled >= 10); /* context + HFI table + boot; >=10 also rings CTRL_INIT */
+ 	}
+ 	return true;
+ }

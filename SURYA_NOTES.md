@@ -1319,7 +1319,18 @@ the GMU only populates those after we write HFI_CTRL_INIT=1 and it processes the
 confirms no message yet from GMU. Observation (minor): rscc_control_ack=0 (same as G4c minimal boot); the
 firmware boots anyway on this SoC - mark for later, not a blocker.
 
-### G4d-d plan (NEXT): ring HFI_CTRL_INIT and see the GMU answer
+### G4d-d built (2026-11-06, patch 0115, sweetgpu=10): ring HFI_CTRL_INIT and watch the GMU
+sweet_gpu_g4d_hfi() now takes a bool; at sweetgpu>=10 after babeface it runs the G4d-d tail: clears
+GMU2HOST_INTR latch, writes GMU_HFI_CTRL_INIT=1, polls HFI_CTRL_STATUS bit 0 for ~100 ms, re-reads
+HFI_VERSION_INFO + GMU2HOST_INTR_INFO + fw_init_result. On bit 0 set: *** HFI IS ALIVE ***. aarch64
+cross-compile clean; patch chains cleanly (5906ce2 -> 9e5de18).
+TEST: build sweetgpu=10, boot variant 5 to lock screen, pull ring, grep -aE "G4d-c|G4d-d|G4d-ctx".
+EXPECT if clean: G4d-d hfi_ctrl_status=0x1, hfi_version non-zero (a6xx HFI version), intr often 0x1
+(message-pending). If not: table layout or queue descriptors are off - revisit HFI_QUEUE_AT (uses
+sizeof(struct hfi_table) which is 232 bytes -> first queue offset should be 240 = 0xf0; dump showed
+queues at offsets 0x350/0x1350/0x2350 which is HFI_QUEUE_AT = (232+15)/16*16 + 4096*i = 240+4096*i;
+HakiOS uses the same). NEXT if HFI is alive: G4d-e - read queue 1 via block_uncached (ml_io_map_wcomb
+on the HFI buffer phys range) and parse the first message; then send a F2H message on queue 0.
 Now the GMU has the table but hasn't been asked to use it. Smaller than G4d-c. Sequence:
   1. Write GMU_HFI_CTRL_INIT = 1 (word 0x5186).
   2. Poll HFI_CTRL_STATUS bit 0 ("hfi active"), ~100 ms. HFI_VERSION_INFO becomes meaningful.

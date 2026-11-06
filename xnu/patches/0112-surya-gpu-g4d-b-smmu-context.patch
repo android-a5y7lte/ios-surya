@@ -1,0 +1,229 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 96483bb..2b89a91 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -15,6 +15,7 @@
+  *   sweetgpu>=5 +G4b: load the GMU firmware into its TCM, core held in reset (patch 0108).
+  *   sweetgpu>=6 +G4c: boot the GMU (release reset, poll for 0xbabeface) (patch 0109).
+  *   sweetgpu>=7 +G4d-a: read-only probe of the GMU's SMMU context banks (patch 0110).
++ *   sweetgpu>=8 +G4d-b: build the GMU's SMMU context + map its HFI buffers (patch 0112).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -31,9 +32,13 @@
+ #include <IOKit/IOLib.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
++#include <mach/vm_param.h>
++#include <vm/vm_kern.h>
+ 
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern "C" vm_offset_t ml_static_ptovirt(vm_offset_t paddr);
++extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
++extern "C" uint64_t kvtophys(vm_offset_t va);
+ 
+ class SweetGPU : public IOService {
+ 	OSDeclareDefaultStructors(SweetGPU);
+@@ -171,6 +176,16 @@ smmu_rd(vm_offset_t base, uint32_t off)
+ 	return v;
+ }
+ 
++/* The matching store for the hypervisor-emulated SMMU registers: the plain "str
++ * w,[x]" form, noinline, exactly as HakiOS's wr() does. A compiler-chosen store
++ * (an addressing mode, a pair store) can make the emulation go wrong. */
++static void __attribute__((noinline))
++smmu_wr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	vm_offset_t a = base + off;
++	__asm__ volatile ("str %w0, [%1]" : : "r" (val), "r" (a) : "memory");
++}
++
+ /* poll off until (read & mask) == want, up to ~5 ms; returns the match and the
+  * last value read. */
+ static bool
+@@ -500,6 +515,175 @@ sweet_gpu_g4d_smmu_probe(void)
+ 	printf("SWEET GPU: G4d-a done - an enabled CB (M=1) with a non-zero ttbr0 is a live context (the GMU's, if ABL set it up)\n");
+ }
+ 
++/* ---- G4d-b: give the GMU its own SMMU context so it can reach shared memory ------
++ * G4d-a found the GPU SMMU in pure reset - every stream faults, no live context.
++ * HFI (the kernel<->GMU message channel) needs stream 5 (the GMU) to translate
++ * through page tables of ours that map the buffers the a6xx GMU firmware uses, at
++ * the fixed GPU-side addresses mainline's a6xx_gmu uses:
++ *     0x60000000  two scratch ("dummy") pages the firmware touches
++ *     0x60002000  16K firmware log
++ *     0x60006000  one page: the HFI table + queues (filled in G4d-c)
++ * All seven 4K pages share the same level-1 and level-2 entry (iova[38:21] equal),
++ * so the map is just three 4K tables (root/L1, one L2, one L3) that fit in one CPU
++ * page - no general allocator. The GPU SMMU granule is 4K (dt qcom,use-3-lvl-tables)
++ * regardless of this kernel's 16K CPU page. Stream table and context-bank registers
++ * are the hypervisor's emulation, so every access is the plain asm ldr/str
++ * (smmu_rd/smmu_wr) and each write is read back. This only BUILDS + verifies the
++ * translation; it does not yet talk to the GMU (that is G4d-c). Memory is ours and
++ * nothing in the SMMU outlives the run. Sequence: HakiOS space_on / Linux
++ * arm-smmu.c + io-pgtable-arm.c. */
++#define SMMU_GRANULE        0x1000u                      /* GPU SMMU page size (not the CPU's) */
++#define SMMU_CBAR(gr1,n)    ((gr1) + 4u*(n))             /* in the GR1 page */
++#define SMMU_CBA2R(gr1,n)   ((gr1) + 0x800u + 4u*(n))    /* in the GR1 page */
++#define SMMU_CB_TCR2        0x0010u
++#define SMMU_CB_TTBR1_LO    0x0028u
++#define SMMU_CB_MAIR0       0x0038u
++#define SMMU_CB_MAIR1       0x003cu
++#define SMMU_CB_FAR_LO      0x0060u
++#define SMMU_CB_FAR_HI      0x0064u
++#define SMMU_CB_FSYNR0      0x0068u
++#define SMMU_CB_TLBIASID    0x0610u
++#define SMMU_CB_TLBSYNC     0x07f0u
++#define SMMU_CB_TLBSTATUS   0x07f4u
++#define SMMU_SMR_VALID      (1u << 31)
++#define SMMU_CBAR_STAGE1    (1u<<16 | 3u<<8 | 0xfu<<12)  /* stage-1, weakest defaults: our tables decide */
++#define SMMU_CBA2R_VA64     1u
++#define SMMU_SCTLR_ON       (1u<<0 | 1u<<1 | 1u<<2 | 1u<<5 | 1u<<12) /* M on, faults recorded, no interrupt */
++#define SMMU_TCR_39BIT      (25u | 1u<<8 | 1u<<10 | 3u<<12 | 1u<<23) /* 39-bit VA, one table of 4K, cached walks */
++#define SMMU_TCR2_CFG       (1u | 1u<<4 | 7u<<15)        /* 36-bit PA, 16-bit context tag */
++#define SMMU_MAIR0_CFG      0xf404ff44u                  /* 0 uncached, 1 cached, 2 device */
++#define SMMU_FSR_FAULTS     0xc00001feu
++/* ARMv8 long-descriptor PTE bits (3 level, 4K, 39-bit VA) */
++#define PTE_TABLE           0x3ull
++#define PTE_PAGE            0x3ull
++#define PTE_SHARED          (2ull << 8)
++#define PTE_ACCESSED        (1ull << 10)
++#define PTE_NOT_GLOBAL      (1ull << 11)
++#define PTE_GMU             (PTE_SHARED | PTE_ACCESSED | PTE_NOT_GLOBAL) /* GMU accesses: privileged, uncached */
++/* the GMU's view (mainline a6xx_gmu) */
++#define GMU_CTX             1u          /* SMMU context bank for the GMU (0 kept for the 3D core) */
++#define GMU_SMMU_STREAM     5u          /* dt iommus: the GMU's stream id */
++#define GMU_SMMU_MASK       0x400u      /* dt iommus: the mask cell */
++#define GMU_SMMU_MATCH      1u          /* stream-table entry to use (0 kept for the 3D core) */
++#define GMU_IOVA_BASE       0x60000000u /* L1=1 L2=0 L3=0; the 7 pages are L3[0..6] */
++#define GMU_MAP_PAGES       7u          /* 2 dummy + 4 log + 1 hfi */
++
++/* push CPU writes out to DRAM: the SMMU walks tables and the GMU reads buffers from
++ * memory, not this core's cache. */
++static void
++to_memory(vm_offset_t start, vm_size_t size)
++{
++	for (vm_offset_t line = start & ~(vm_offset_t)63; line < start + size; line += 64) {
++		__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++static void
++sweet_gpu_g4d_setup(void)
++{
++	kern_return_t kr;
++	vm_offset_t tables = 0, buffers = 0;
++
++	printf("SWEET GPU: G4d-b build the GMU's SMMU context (bank %u, stream %u) and map its HFI buffers\n",
++	    GMU_CTX, GMU_SMMU_STREAM);
++
++	/* vote the SMMU clock on (idempotent; G4d-a did it too) and map the SMMU */
++	vm_offset_t cc = ml_io_map(GPUCC_PA, GPUCC_SIZE);
++	branch_on(cc, "smmu vote", GPUCC_SMMU_VOTE_CBCR);
++	vm_offset_t s = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
++
++	/* geometry from ID1 (same decode as G4d-a) */
++	uint32_t id1 = smmu_rd(s, SMMU_ID1);
++	uint32_t pgshift = (id1 & (1u << 31)) ? 16u : 12u;
++	uint32_t numpage = 1u << (((id1 >> 28) & 7u) + 1u);
++	uint32_t pgsize  = 1u << pgshift;
++	vm_offset_t gr1  = s + pgsize;                                               /* GR1 page: CBAR/CBA2R */
++	vm_offset_t cb   = s + (numpage << pgshift) + (vm_offset_t)GMU_CTX * pgsize; /* context bank 1 regs */
++
++	/* three 4K page tables (fit in one CPU page) + seven 4K GMU buffer pages, zeroed */
++	kr = kmem_alloc(kernel_map, &tables, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
++	if (kr != KERN_SUCCESS) {
++		printf("SWEET GPU: G4d-b no memory for page tables (%d) - abort\n", kr);
++		return;
++	}
++	kr = kmem_alloc(kernel_map, &buffers, round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE),
++	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
++	if (kr != KERN_SUCCESS) {
++		printf("SWEET GPU: G4d-b no memory for GMU buffers (%d) - abort\n", kr);
++		return;
++	}
++	uint64_t *l1 = (uint64_t *)(tables + 0x0000u);
++	uint64_t *l2 = (uint64_t *)(tables + 0x1000u);
++	uint64_t *l3 = (uint64_t *)(tables + 0x2000u);
++
++	/* all seven iovas share L1[1] and L2[0]; each page is L3[k] (k = (iova>>12)&0x1ff) */
++	l1[(GMU_IOVA_BASE >> 30) & 0x1ffu] = kvtophys((vm_offset_t)l2) | PTE_TABLE;
++	l2[(GMU_IOVA_BASE >> 21) & 0x1ffu] = kvtophys((vm_offset_t)l3) | PTE_TABLE;
++	for (uint32_t k = 0; k < GMU_MAP_PAGES; k++) {
++		uint64_t phys = kvtophys(buffers + (vm_offset_t)k * SMMU_GRANULE);
++		l3[((GMU_IOVA_BASE >> 12) & 0x1ffu) + k] = phys | PTE_GMU | PTE_PAGE;
++	}
++	to_memory(tables, PAGE_SIZE);
++	to_memory(buffers, round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE));
++
++	uint64_t ttbr0 = kvtophys((vm_offset_t)l1) | ((uint64_t)GMU_CTX << 48);   /* tagged with the context number */
++	printf("SWEET GPU: G4d-b tables@phys 0x%llx buffers@phys 0x%llx ttbr0=0x%llx iova 0x%08x..0x%08x\n",
++	    (uint64_t)kvtophys((vm_offset_t)l1), (uint64_t)kvtophys(buffers), ttbr0,
++	    GMU_IOVA_BASE, GMU_IOVA_BASE + GMU_MAP_PAGES * SMMU_GRANULE - 1u);
++
++	/* program context bank 1 (arm-smmu.c order); these writes are the hypervisor's emulation */
++	printf("SWEET GPU: G4d-b about to program context bank %u (sctlr/cbar/tcr/ttbr0)\n", GMU_CTX);
++	smmu_wr(cb, SMMU_CB_SCTLR, 0);                                 /* off while programming */
++	smmu_wr(gr1, SMMU_CBA2R(0, GMU_CTX), SMMU_CBA2R_VA64);
++	smmu_wr(gr1, SMMU_CBAR(0, GMU_CTX), SMMU_CBAR_STAGE1);
++	smmu_wr(cb, SMMU_CB_TCR2, SMMU_TCR2_CFG);
++	smmu_wr(cb, SMMU_CB_TCR, SMMU_TCR_39BIT);
++	smmu_wr(cb, SMMU_CB_TTBR0_LO, (uint32_t)ttbr0);
++	smmu_wr(cb, SMMU_CB_TTBR0_HI, (uint32_t)(ttbr0 >> 32));
++	smmu_wr(cb, SMMU_CB_TTBR1_LO, 0);
++	smmu_wr(cb, SMMU_CB_TTBR1_LO + 4u, 0);
++	smmu_wr(cb, SMMU_CB_MAIR0, SMMU_MAIR0_CFG);
++	smmu_wr(cb, SMMU_CB_MAIR1, 0);
++	smmu_wr(cb, SMMU_CB_FSR, SMMU_FSR_FAULTS);                     /* write-1-to-clear any stale fault */
++	smmu_wr(cb, SMMU_CB_TLBIASID, GMU_CTX);
++	smmu_wr(cb, SMMU_CB_TLBSYNC, 1);
++	uint32_t tlb = 0;
++	for (int i = 0; i < 500; i++) { tlb = smmu_rd(cb, SMMU_CB_TLBSTATUS); if ((tlb & 1u) == 0) { break; } IODelay(10); }
++	smmu_wr(cb, SMMU_CB_SCTLR, SMMU_SCTLR_ON);
++
++	/* send stream 5 through this context: S2CR (translate -> cbndx) then SMR (valid) */
++	printf("SWEET GPU: G4d-b about to point stream %u (match %u) at context %u\n",
++	    GMU_SMMU_STREAM, GMU_SMMU_MATCH, GMU_CTX);
++	smmu_wr(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH, GMU_CTX);         /* type 0 = translate, cbndx = context */
++	smmu_wr(s, SMMU_SMR0 + 4u * GMU_SMMU_MATCH, SMMU_SMR_VALID | (GMU_SMMU_MASK << 16) | GMU_SMMU_STREAM);
++
++	/* read back what the hypervisor actually took */
++	uint32_t smr   = smmu_rd(s, SMMU_SMR0 + 4u * GMU_SMMU_MATCH);
++	uint32_t s2cr  = smmu_rd(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH);
++	uint32_t sctlr = smmu_rd(cb, SMMU_CB_SCTLR);
++	uint32_t tlo   = smmu_rd(cb, SMMU_CB_TTBR0_LO);
++	uint32_t thi   = smmu_rd(cb, SMMU_CB_TTBR0_HI);
++	uint32_t cbar  = smmu_rd(gr1, SMMU_CBAR(0, GMU_CTX));
++	uint32_t fsr   = smmu_rd(cb, SMMU_CB_FSR);
++	bool ok = smr == (SMMU_SMR_VALID | (GMU_SMMU_MASK << 16) | GMU_SMMU_STREAM) &&
++	    (s2cr & 0x300ffu) == GMU_CTX && (sctlr & 1u) != 0 &&
++	    tlo == (uint32_t)ttbr0 && thi == (uint32_t)(ttbr0 >> 32) &&
++	    (cbar & 0x30000u) == (SMMU_CBAR_STAGE1 & 0x30000u);
++	printf("SWEET GPU: G4d-b readback smr=0x%08x s2cr=0x%08x cbar=0x%08x sctlr=0x%08x (M=%u) ttbr0=0x%08x%08x fsr=0x%08x\n",
++	    smr, s2cr, cbar, sctlr, sctlr & 1u, thi, tlo, fsr);
++	if ((fsr & SMMU_FSR_FAULTS) != 0) {
++		printf("SWEET GPU: G4d-b context FAULTED while programming: far=0x%08x%08x fsynr0=0x%08x\n",
++		    smmu_rd(cb, SMMU_CB_FAR_HI), smmu_rd(cb, SMMU_CB_FAR_LO), smmu_rd(cb, SMMU_CB_FSYNR0));
++	}
++	if (ok) {
++		printf("SWEET GPU: G4d-b *** GMU SMMU CONTEXT IS LIVE *** stream %u -> context %u, tables mapped, no fault. Next: G4d-c (HFI).\n",
++		    GMU_SMMU_STREAM, GMU_CTX);
++	} else {
++		printf("SWEET GPU: G4d-b the SMMU did not take the config (see readback) - recoverable, reboot. Likely the hypervisor restricts this context/stream.\n");
++	}
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -553,6 +737,9 @@ SweetGPU::start(IOService *provider)
+ 	if (enabled >= 7) {
+ 		sweet_gpu_g4d_smmu_probe();
+ 	}
++	if (enabled >= 8) {
++		sweet_gpu_g4d_setup();
++	}
+ 	return true;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

@@ -1225,14 +1225,41 @@ handles the plain "ldr w,[x]" load form (HakiOS header note: a store of the zero
 compiler-chosen addressing mode can hang. HakiOS smmu reads use explicit inline-asm ldr. CONFIRMED from HakiOS:
 GPU SMMU = qcom,qsmmu-v500 (MMU-500) with qcom,skip-init; streams: 0 GPU, 1 lp-twin, 2 secure, 5 GMU.
 
-### G4d-a result #2 PENDING (patch 0111, sweetgpu=7): vote SMMU clock + hypervisor-safe reads
-Fix on top of 0110: (a) ml_io_map GPUCC and branch_on(cc,"smmu vote",0x5000) at the top of the probe; (b) new
-smmu_rd() helper does every SMMU access via asm `ldr %w0,[%1]` (noinline); (c) "about to read ..." markers
-before the SMR loop and the CB loop so any residual hang is pinpointed to a region. Reconstructed+clang-checked
-(aarch64 asm OK), git apply --check clean on 0110. EXPECT now: branch "smmu vote" on, then smr[0..4] (look for
-the valid SMR whose id=5 => the GMU's stream -> its cbndx) and cb[0..4] (an M=1 CB with non-zero ttbr0 = a live
-context). If it STILL hangs after the vote, the last "about to read" line localizes it and we go secure-path
-(SCM). TEST: build sweetgpu=7, boot variant 5 to lock screen, pull ring, grep -aE "G4d-a".
+### G4d-a result #2 DONE (2026-11-06, patch 0111, sweetgpu=7, CI run 42270350007): FIX WORKED, full dump
+Both 0110 bugs gone. branch "smmu vote 0x0 -> 0x1 (on)" landed; every SMMU reg read back via smmu_rd() asm with
+NO hang. Full probe completed. FINDINGS (facts):
+  - geom pgshift=12 numpage=8 gr1=0x1000 cb_base=0x8000 num_cb=5 num_smr=5 scr0=0x00200626
+  - ALL 5 SMRs blank: valid=0 id=0x0000 mask=0.
+  - ALL 5 S2CRs at reset: s2cr=0x000200ff => type=2 (FAULT, not bypass) cbndx=255.
+  - ALL 5 CBs empty: cbar=0 sctlr=0 (M=0, translation off) ttbr0=0 tcr=0 fsr=0.
+INTERPRETATION (fact): ABL did NOT configure the GPU SMMU - it is in pure reset (matches qcom,skip-init). There
+is NO pre-existing GMU context to reuse; the whole table is ours to set up. The GMU still booted at G4c because
+it ran from on-chip TCM and issued no bus DMA; the SMMU only matters once HFI shared-memory starts.
+CONSEQUENCE: G4d-b must own the SMMU setup end to end (context bank + page table + HFI buffer mapping), there is
+nothing to piggyback on.
+
+### G4d-b built (2026-11-06, patch 0112, sweetgpu>=8): build the GMU's SMMU context + map HFI buffers
+Since G4d-a proved the SMMU is blank and ours to set up, G4d-b (sweet_gpu_g4d_setup) builds the GMU a real
+translation context. New: smmu_wr() (asm `str w,[x]` noinline, the hypervisor-safe store matching smmu_rd);
+to_memory() (dc civac + dsb, tables/buffers must reach DRAM, not sit in CPU cache); externs kvtophys,
+ml_io_map_wcomb; includes mach/vm_param.h + vm/vm_kern.h (kmem_alloc/kernel_map/KMA_*). What it does:
+  - votes SMMU clock, maps SMMU; geometry from ID1 (pgshift/numpage -> gr1=s+0x1000, cb1=s+0x9000).
+  - kmem_alloc 1 CPU page for 3 4K page tables (L1@+0,L2@+0x1000,L3@+0x2000) + 7 4K GMU buffer pages, zeroed.
+    SMMU granule is 4K (dt qcom,use-3-lvl-tables) even though this kernel's CPU PAGE_SIZE is 16K.
+  - maps mainline a6xx_gmu iova layout: 0x60000000 (2 dummy) + 0x60002000 (16K log) + 0x60006000 (1 HFI page).
+    All 7 iovas share L1[1] and L2[0], so it is ONE L3 table, entries L3[0..6]. ttbr0=phys(L1)|(ctx<<48).
+  - programs context bank 1 (arm-smmu.c order: sctlr=0, cba2r VA64, cbar stage1, tcr2, tcr 39-bit, ttbr0,
+    mair0, fsr clear, tlbiasid, tlbsync+poll, sctlr ON) then S2CR(match1)=ctx, SMR(match1)=valid|mask0x400|
+    stream5. All writes via smmu_wr; each read back. Checks FSR for a fault.
+  - EXPECT: readback smr/s2cr/cbar/sctlr(M=1)/ttbr0 all match => "GMU SMMU CONTEXT IS LIVE"; fsr=0. If the
+    hypervisor restricts context1/stream5 the readback mismatches (ok=false) - informative, recoverable.
+Reconstructed on recon (blob chain: 0111 new 96483bb == 0112 old, applies in sequence). aarch64 cross-compile
+of the new block clean (asm str/ldr/dc civac + C++ syntax OK). Committed + pushed; CI pending.
+TEST: build sweetgpu=8, boot variant 5 to lock screen, pull ring, grep -aE "G4d-b".
+NEXT if live: G4d-c - fill the HFI table/queues in the 0x60006000 buffer, write HFI_QTBL_ADDR/INFO + CHIP,
+CTRL_INIT=1, poll HFI_CTRL_STATUS. If the context is rejected: try context 0/other match entries, or the
+secure path. NOTE on ordering: G4c already booted the GMU (babeface) before this runs; HakiOS sets the context
+up BEFORE firmware boot. If the GMU ignores an after-the-fact context at G4d-c, reorder so G4d-b runs pre-boot.
 
 ### G4d plan (NEXT): HFI - let the kernel talk to the running GMU
 Now the GMU runs, the next real step is HFI (Host-Firmware Interface): the message channel the kernel uses to

@@ -1330,7 +1330,27 @@ first message". Two weaker hypotheses: queue layout off (mesa uses page-aligned 
 firmware init. Strongest next test: send the GMU_INIT message (which falsifies hyp.1 immediately if it
 succeeds).
 
-### G4d-e plan (NEXT): send the first F2H message (GMU_INIT) and complete the handshake
+### G4d-e built (2026-11-07 00:20, patch 0116, sweetgpu=11): send GMU_INIT, poll q1 for the ack
+sweet_gpu_g4d_hfi() now takes int stage (0=G4d-c, 1=+G4d-d, 2=+G4d-e); dispatch maps sweetgpu-9 clamped to
+[0,2]. G4d-e tail: ml_io_map_wcomb() over the HFI buffer phys range for uncached CPU<->GMU shared memory
+(so our writes land in DRAM at once, and reads see what the GMU wrote with no manual cache ops); read
+hfi->queue[0].write (= w0); write the 5-dword GMU_INIT at q0_data[w0..w0+4] - hdr = id 0x01|size 5|type 0,
+seg_id=0, dbg_buf_addr=0, dbg_buf_size=0, boot_state=0 (cold); bump hfi->queue[0].write += 5; dsb sy; clear
+GMU2HOST_INTR latch; write GMU_HOST2GMU_INTR_SET=1 to ring the GMU. Poll up to ~100ms for either
+GMU2HOST_INTR_INFO or hfi->queue[1].write to advance, then dump HFI_CTRL_STATUS/VERSION_INFO and the q1
+ack header (id/size/type) + first 3 payload dwords. aarch64 cross-compile clean, blob chain 9e5de18 ->
+c8b62db applies in sequence.
+TEST: build sweetgpu=11, boot variant 5 to lock screen, pull ring, grep -aE "G4d-c|G4d-d|G4d-e|G4d-ctx".
+EXPECT best case: q1_write != 0, q1 ack header with id/size (vendor ACK format), hfi_status bit 0 set,
+*** HFI HANDSHAKE SUCCEEDED ***. First nice-to-see: hfi_version != 0 (the GMU's HFI protocol version).
+EXPECT failures and what each means:
+  - q1_write=0, CTRL_STATUS still 0xfe: GMU_INIT packet layout is wrong (size/payload for this a618
+    fw). Next: dump q0 read-pointer (hfi->queue[0].read) - if GMU advanced it, it tried to parse;
+    if not, interrupt didn't deliver.
+  - q1_write=0, CTRL_STATUS==0xff: firmware NACK'd the init. Try mesa page-aligned queue layout.
+  - ml_io_map_wcomb returns 0: the physical range isn't mapping (unlikely for kmem_alloc pages).
+NEXT if handshake succeeds: perf/bw tables (vendor a6xx_hfi_send_perf_table_v1 / _bw_table), then GX rail.
+NEXT if it does not: toggle to mesa layout and retry (one-value change in HFI_QUEUE_AT).
 Vendor a6xx_hfi_send_gmu_init: build H2F_MSG_INIT packet (header: id|size|type, payload: boot_state),
 write it into queue 0 at [write*4], advance queue 0 write index, ring GMU_HOST2GMU_INTR_SET=1, poll
 GMU_GMU2HOST_INTR_INFO for an incoming message bit, then read q1 (gmu->host) at [read*4] for the

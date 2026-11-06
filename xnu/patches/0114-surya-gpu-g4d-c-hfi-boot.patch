@@ -1,0 +1,300 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 352fc58..5906ce2 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -16,6 +16,8 @@
+  *   sweetgpu>=6 +G4c: boot the GMU (release reset, poll for 0xbabeface) (patch 0109).
+  *   sweetgpu>=7 +G4d-a: read-only probe of the GMU's SMMU context banks (patch 0110).
+  *   sweetgpu>=8 +G4d-b: build the GMU's SMMU context + map its HFI buffers (patch 0112).
++ *   sweetgpu>=9  G4d-c: context + HFI message table + configured GMU boot (patch 0114).
++ *               (>=9 runs G4d-c INSTEAD of the minimal G4c boot - HFI must be set pre-boot.)
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -567,8 +569,33 @@ sweet_gpu_g4d_smmu_probe(void)
+                                          * (HakiOS's 0x400 is SM7325's 2-cell binding; writing an
+                                          * unused mask bit made this SMMU drop the whole SMR write) */
+ #define GMU_SMMU_MATCH      1u          /* stream-table entry to use (0 kept for the 3D core) */
+-#define GMU_IOVA_BASE       0x60000000u /* L1=1 L2=0 L3=0; the 7 pages are L3[0..6] */
+-#define GMU_MAP_PAGES       7u          /* 2 dummy + 4 log + 1 hfi */
++#define GMU_IOVA_BASE       0x60000000u /* L1=1 L2=0 L3=0; all pages are L3[0..n], same L1/L2 */
++#define GMU_IOVA_LOG        0x60002000u /* 16K firmware log (pages 2..5) */
++#define GMU_IOVA_HFI        0x60006000u /* HFI table + 3 queues (pages 6..9, 16K) */
++#define GMU_LOG_PAGES_M1    3u          /* (16K/4K - 1), as PWR_COL_CP_MSG wants it */
++#define GMU_HFI_PAGE0       6u          /* index of the first HFI page in the buffer block */
++#define GMU_MAP_PAGES       10u         /* 2 dummy + 4 log + 4 hfi */
++
++/* G4d-c HFI (Host-Firmware Interface) - the GMU registers that must be set BEFORE the
++ * core is released from reset, plus the message-queue table laid in the HFI buffer.
++ * Offsets are word*4 (a6xx); struct layout + values from HakiOS step_gmu_start. */
++#define GMU_PWR_COL_CP_MSG   GMU_WORD(0x5100u)  /* at start: log iova | (log pages - 1) */
++#define GMU_PWR_COL_CP_RESP  GMU_WORD(0x5101u)
++#define GMU_HFI_QTBL_INFO    GMU_WORD(0x5184u)
++#define GMU_HFI_QTBL_ADDR    GMU_WORD(0x5185u)  /* the HFI table's iova */
++#define GMU_HFI_CTRL_INIT    GMU_WORD(0x5186u)
++#define GMU_HOST2GMU_INTR_SET GMU_WORD(0x5194u)
++#define HFI_QUEUES           3u          /* 0: host->gmu, 1: gmu->host, 2: gmu debug */
++#define HFI_QUEUE_WORDS      1024u
++
++struct hfi_queue {
++	uint32_t status, start, type, words, message_words, unused[5], read, write;
++};
++struct hfi_table {
++	uint32_t version, words, first_queue, queue_words, queues, active_queues;
++	struct hfi_queue queue[17];
++};
++#define HFI_QUEUE_AT(n)     ((((uint32_t)sizeof(struct hfi_table) + 15u) / 16u * 16u) + 4096u * (n))
+ 
+ /* push CPU writes out to DRAM: the SMMU walks tables and the GMU reads buffers from
+  * memory, not this core's cache. */
+@@ -581,46 +608,40 @@ to_memory(vm_offset_t start, vm_size_t size)
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ }
+ 
+-static void
+-sweet_gpu_g4d_setup(void)
++/* Build the GMU's stage-1 SMMU context and map its dummy/log/HFI buffers (the G4d-b
++ * work, factored out so G4d-c can reuse it). Returns whether the hypervisor took the
++ * stream match (the context is then live); *buffers_out is the kernel VA of the GMU
++ * buffer block (page GMU_HFI_PAGE0 begins the HFI region). */
++static bool
++gmu_build_context(vm_offset_t *buffers_out)
+ {
+ 	kern_return_t kr;
+ 	vm_offset_t tables = 0, buffers = 0;
+ 
+-	printf("SWEET GPU: G4d-b build the GMU's SMMU context (bank %u, stream %u) and map its HFI buffers\n",
+-	    GMU_CTX, GMU_SMMU_STREAM);
+-
+-	/* vote the SMMU clock on (idempotent; G4d-a did it too) and map the SMMU */
++	/* vote the SMMU clock on (idempotent) and map the SMMU */
+ 	vm_offset_t cc = ml_io_map(GPUCC_PA, GPUCC_SIZE);
+ 	branch_on(cc, "smmu vote", GPUCC_SMMU_VOTE_CBCR);
+ 	vm_offset_t s = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
+ 
+-	/* geometry from ID1 (same decode as G4d-a) */
+ 	uint32_t id1 = smmu_rd(s, SMMU_ID1);
+ 	uint32_t pgshift = (id1 & (1u << 31)) ? 16u : 12u;
+ 	uint32_t numpage = 1u << (((id1 >> 28) & 7u) + 1u);
+ 	uint32_t pgsize  = 1u << pgshift;
+-	vm_offset_t gr1  = s + pgsize;                                               /* GR1 page: CBAR/CBA2R */
+-	vm_offset_t cb   = s + (numpage << pgshift) + (vm_offset_t)GMU_CTX * pgsize; /* context bank 1 regs */
++	vm_offset_t gr1  = s + pgsize;
++	vm_offset_t cb   = s + (numpage << pgshift) + (vm_offset_t)GMU_CTX * pgsize;
+ 
+-	/* three 4K page tables (fit in one CPU page) + seven 4K GMU buffer pages, zeroed */
++	/* three 4K page tables (fit in one CPU page) + the GMU buffer pages, zeroed */
+ 	kr = kmem_alloc(kernel_map, &tables, PAGE_SIZE, (kma_flags_t)(KMA_KOBJECT | KMA_ZERO | KMA_DATA),
+ 	    VM_KERN_MEMORY_IOKIT);
+-	if (kr != KERN_SUCCESS) {
+-		printf("SWEET GPU: G4d-b no memory for page tables (%d) - abort\n", kr);
+-		return;
+-	}
++	if (kr != KERN_SUCCESS) { printf("SWEET GPU: G4d no memory for page tables (%d)\n", kr); return false; }
+ 	kr = kmem_alloc(kernel_map, &buffers, round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE),
+ 	    (kma_flags_t)(KMA_KOBJECT | KMA_ZERO | KMA_DATA), VM_KERN_MEMORY_IOKIT);
+-	if (kr != KERN_SUCCESS) {
+-		printf("SWEET GPU: G4d-b no memory for GMU buffers (%d) - abort\n", kr);
+-		return;
+-	}
++	if (kr != KERN_SUCCESS) { printf("SWEET GPU: G4d no memory for GMU buffers (%d)\n", kr); return false; }
++	*buffers_out = buffers;
++
+ 	uint64_t *l1 = (uint64_t *)(tables + 0x0000u);
+ 	uint64_t *l2 = (uint64_t *)(tables + 0x1000u);
+ 	uint64_t *l3 = (uint64_t *)(tables + 0x2000u);
+-
+-	/* all seven iovas share L1[1] and L2[0]; each page is L3[k] (k = (iova>>12)&0x1ff) */
+ 	l1[(GMU_IOVA_BASE >> 30) & 0x1ffu] = kvtophys((vm_offset_t)l2) | PTE_TABLE;
+ 	l2[(GMU_IOVA_BASE >> 21) & 0x1ffu] = kvtophys((vm_offset_t)l3) | PTE_TABLE;
+ 	for (uint32_t k = 0; k < GMU_MAP_PAGES; k++) {
+@@ -630,14 +651,13 @@ sweet_gpu_g4d_setup(void)
+ 	to_memory(tables, PAGE_SIZE);
+ 	to_memory(buffers, round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE));
+ 
+-	uint64_t ttbr0 = kvtophys((vm_offset_t)l1) | ((uint64_t)GMU_CTX << 48);   /* tagged with the context number */
+-	printf("SWEET GPU: G4d-b tables@phys 0x%llx buffers@phys 0x%llx ttbr0=0x%llx iova 0x%08x..0x%08x\n",
++	uint64_t ttbr0 = kvtophys((vm_offset_t)l1) | ((uint64_t)GMU_CTX << 48);
++	printf("SWEET GPU: G4d-ctx tables@phys 0x%llx buffers@phys 0x%llx ttbr0=0x%llx iova 0x%08x..0x%08x\n",
+ 	    (uint64_t)kvtophys((vm_offset_t)l1), (uint64_t)kvtophys(buffers), ttbr0,
+ 	    GMU_IOVA_BASE, GMU_IOVA_BASE + GMU_MAP_PAGES * SMMU_GRANULE - 1u);
+ 
+-	/* program context bank 1 (arm-smmu.c order); these writes are the hypervisor's emulation */
+-	printf("SWEET GPU: G4d-b about to program context bank %u (sctlr/cbar/tcr/ttbr0)\n", GMU_CTX);
+-	smmu_wr(cb, SMMU_CB_SCTLR, 0);                                 /* off while programming */
++	/* program context bank 1 (arm-smmu.c order); writes via the hypervisor-safe str */
++	smmu_wr(cb, SMMU_CB_SCTLR, 0);
+ 	smmu_wr(gr1, SMMU_CBA2R(0, GMU_CTX), SMMU_CBA2R_VA64);
+ 	smmu_wr(gr1, SMMU_CBAR(0, GMU_CTX), SMMU_CBAR_STAGE1);
+ 	smmu_wr(cb, SMMU_CB_TCR2, SMMU_TCR2_CFG);
+@@ -648,20 +668,15 @@ sweet_gpu_g4d_setup(void)
+ 	smmu_wr(cb, SMMU_CB_TTBR1_LO + 4u, 0);
+ 	smmu_wr(cb, SMMU_CB_MAIR0, SMMU_MAIR0_CFG);
+ 	smmu_wr(cb, SMMU_CB_MAIR1, 0);
+-	smmu_wr(cb, SMMU_CB_FSR, SMMU_FSR_FAULTS);                     /* write-1-to-clear any stale fault */
++	smmu_wr(cb, SMMU_CB_FSR, SMMU_FSR_FAULTS);
+ 	smmu_wr(cb, SMMU_CB_TLBIASID, GMU_CTX);
+ 	smmu_wr(cb, SMMU_CB_TLBSYNC, 1);
+ 	uint32_t tlb = 0;
+ 	for (int i = 0; i < 500; i++) { tlb = smmu_rd(cb, SMMU_CB_TLBSTATUS); if ((tlb & 1u) == 0) { break; } IODelay(10); }
+ 	smmu_wr(cb, SMMU_CB_SCTLR, SMMU_SCTLR_ON);
+-
+-	/* send stream 5 through this context: S2CR (translate -> cbndx) then SMR (valid) */
+-	printf("SWEET GPU: G4d-b about to point stream %u (match %u) at context %u\n",
+-	    GMU_SMMU_STREAM, GMU_SMMU_MATCH, GMU_CTX);
+-	smmu_wr(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH, GMU_CTX);         /* type 0 = translate, cbndx = context */
++	smmu_wr(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH, GMU_CTX);
+ 	smmu_wr(s, SMMU_SMR0 + 4u * GMU_SMMU_MATCH, SMMU_SMR_VALID | (GMU_SMMU_MASK << 16) | GMU_SMMU_STREAM);
+ 
+-	/* read back what the hypervisor actually took */
+ 	uint32_t smr   = smmu_rd(s, SMMU_SMR0 + 4u * GMU_SMMU_MATCH);
+ 	uint32_t s2cr  = smmu_rd(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH);
+ 	uint32_t sctlr = smmu_rd(cb, SMMU_CB_SCTLR);
+@@ -673,17 +688,117 @@ sweet_gpu_g4d_setup(void)
+ 	    (s2cr & 0x300ffu) == GMU_CTX && (sctlr & 1u) != 0 &&
+ 	    tlo == (uint32_t)ttbr0 && thi == (uint32_t)(ttbr0 >> 32) &&
+ 	    (cbar & 0x30000u) == (SMMU_CBAR_STAGE1 & 0x30000u);
+-	printf("SWEET GPU: G4d-b readback smr=0x%08x s2cr=0x%08x cbar=0x%08x sctlr=0x%08x (M=%u) ttbr0=0x%08x%08x fsr=0x%08x\n",
++	printf("SWEET GPU: G4d-ctx readback smr=0x%08x s2cr=0x%08x cbar=0x%08x sctlr=0x%08x (M=%u) ttbr0=0x%08x%08x fsr=0x%08x\n",
+ 	    smr, s2cr, cbar, sctlr, sctlr & 1u, thi, tlo, fsr);
+-	if ((fsr & SMMU_FSR_FAULTS) != 0) {
+-		printf("SWEET GPU: G4d-b context FAULTED while programming: far=0x%08x%08x fsynr0=0x%08x\n",
+-		    smmu_rd(cb, SMMU_CB_FAR_HI), smmu_rd(cb, SMMU_CB_FAR_LO), smmu_rd(cb, SMMU_CB_FSYNR0));
+-	}
+-	if (ok) {
+-		printf("SWEET GPU: G4d-b *** GMU SMMU CONTEXT IS LIVE *** stream %u -> context %u, tables mapped, no fault. Next: G4d-c (HFI).\n",
++	return ok;
++}
++
++static void
++sweet_gpu_g4d_setup(void)
++{
++	vm_offset_t buffers = 0;
++	printf("SWEET GPU: G4d-b build the GMU's SMMU context (bank %u, stream %u) and map its buffers\n",
++	    GMU_CTX, GMU_SMMU_STREAM);
++	if (gmu_build_context(&buffers)) {
++		printf("SWEET GPU: G4d-b *** GMU SMMU CONTEXT IS LIVE *** stream %u -> context %u, tables mapped. Next: G4d-c (HFI).\n",
+ 		    GMU_SMMU_STREAM, GMU_CTX);
+ 	} else {
+-		printf("SWEET GPU: G4d-b the SMMU did not take the config (see readback) - recoverable, reboot. Likely the hypervisor restricts this context/stream.\n");
++		printf("SWEET GPU: G4d-b the SMMU did not take the config (see readback) - recoverable, reboot.\n");
++	}
++}
++
++/* G4d-c: the real HFI bring-up. The GMU must learn where its message table is BEFORE
++ * its firmware starts, so - unlike the minimal G4c boot - this takes the boot itself:
++ * build the SMMU context (so the GMU can reach the buffers), lay the HFI queue table in
++ * the mapped HFI region, write the full register config INCLUDING the HFI/log registers
++ * while the core is held in reset, THEN release it and poll. On success the firmware
++ * reaches 0xbabeface AND the HFI control/version registers become meaningful. Runs
++ * INSTEAD OF the standalone G4c (gated off at sweetgpu>=9) so the core is still in reset
++ * from G4b. Writing HFI_CTRL_INIT and exchanging messages is the next step (G4d-d).
++ * Sequence: HakiOS step_gmu_start / vendor a6xx_gmu_fw_start. */
++static void
++sweet_gpu_g4d_hfi(void)
++{
++	vm_offset_t buffers = 0;
++	vm_offset_t g = ml_io_map(GMU_PA, GMU_SIZE);
++
++	printf("SWEET GPU: G4d-c HFI bring-up (context + message table + configured boot)\n");
++	if (rd(g, GMU_CM3_SYSRESET) != 1) {
++		printf("SWEET GPU: G4d-c core not in reset - needs sweetgpu>=5 (G4b) with G4c gated off; abort\n");
++		return;
++	}
++	if (!gmu_build_context(&buffers)) {
++		printf("SWEET GPU: G4d-c SMMU context did not come up - abort before boot\n");
++		return;
++	}
++
++	/* lay the HFI table + 3 queue descriptors in the mapped HFI region (kernel VA, flushed) */
++	vm_offset_t hfi_kva = buffers + (vm_offset_t)GMU_HFI_PAGE0 * SMMU_GRANULE;
++	volatile struct hfi_table *hfi = (volatile struct hfi_table *)hfi_kva;
++	static const uint8_t prio[HFI_QUEUES] = { 10, 10, 40 };
++	hfi->words = (uint32_t)sizeof(struct hfi_table) / 4u;
++	hfi->first_queue = 6;
++	hfi->queue_words = (uint32_t)sizeof(struct hfi_queue) / 4u;
++	hfi->queues = hfi->active_queues = HFI_QUEUES;
++	for (uint32_t i = 0; i < HFI_QUEUES; i++) {
++		hfi->queue[i].status = 1;
++		hfi->queue[i].start = GMU_IOVA_HFI + HFI_QUEUE_AT(i);
++		hfi->queue[i].type = i | ((uint32_t)prio[i] << 8);
++		hfi->queue[i].words = HFI_QUEUE_WORDS;
++	}
++	to_memory(hfi_kva, (vm_size_t)(GMU_MAP_PAGES - GMU_HFI_PAGE0) * SMMU_GRANULE);
++	printf("SWEET GPU: G4d-c HFI table @ iova 0x%08x: %u queues (q0=0x%08x q1=0x%08x q2=0x%08x)\n",
++	    GMU_IOVA_HFI, HFI_QUEUES, GMU_IOVA_HFI + HFI_QUEUE_AT(0), GMU_IOVA_HFI + HFI_QUEUE_AT(1),
++	    GMU_IOVA_HFI + HFI_QUEUE_AT(2));
++
++	/* wake the GMU's RPMh channel (as G4c) */
++	wr(g, GMU_RSCC_CONTROL_REQ, 2);
++	uint32_t ack = 0;
++	for (int i = 0; i < 200; i++) { ack = rd(g, GMU_RSCC_CONTROL_ACK); if (ack == 2) { break; } IODelay(100); }
++	wr(g, GMU_RSCC_CONTROL_REQ, 0);
++	printf("SWEET GPU: G4d-c rscc_control_ack=0x%08x\n", ack);
++
++	/* full register config INCLUDING HFI/log, core still in reset (HakiOS step_gmu_start order) */
++	wr(g, GMU_CX_FALNEXT_INTF, 1);
++	wr(g, GMU_CX_FAL_INTF, 1);
++	wr(g, GMU_GENERAL_7, 1);
++	wr(g, GMU_CM3_FW_INIT_RESULT, 0);
++	wr(g, GMU_CM3_BOOT_CONFIG, 2);
++	wr(g, GMU_HFI_QTBL_ADDR, GMU_IOVA_HFI);
++	wr(g, GMU_HFI_QTBL_INFO, 1);
++	wr(g, GMU_AHB_FENCE_RANGE_0, (1u << 31) | ((0xau << 2) << 18) | 0x8a0u);
++	wr(g, GMU_CM3_CFG, 0x4052u);
++	vm_offset_t bif = ml_io_map(GBIF_PA, 0x1000);
++	wr(bif, GBIF_HALT, 0);
++	wr(g, GMU_PWR_COL_CP_RESP, 0);
++	wr(g, GMU_HFI_SFR_ADDR, GMU_CHIP);
++	wr(g, GMU_PWR_COL_CP_MSG, GMU_IOVA_LOG | GMU_LOG_PAGES_M1);
++	wr(g, GMU_SYS_BUS_CONFIG, 1);
++	wr(g, GMU_ICACHE_CONFIG, 1);
++	wr(g, GMU_DCACHE_CONFIG, 1);
++	wr(g, GMU_PWR_COL_INTER_FRAME_CTRL, 0x9c40400u);
++	wr(g, GMU_RPMH_CTRL, rd(g, GMU_RPMH_CTRL) | GMU_RPMH_CTRL_ALL);
++	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
++
++	/* release the core and wait for the firmware to start */
++	printf("SWEET GPU: G4d-c releasing the core (HFI configured); chasing 0xbabeface + HFI status\n");
++	wr(g, GMU_CM3_SYSRESET, 0);
++	uint32_t r = 0;
++	for (int i = 0; i < 5000; i++) {
++		r = rd(g, GMU_CM3_FW_INIT_RESULT);
++		if ((r & GMU_STARTED_MASK) == GMU_STARTED || r == 0xbabefaceu || (r & GMU_FAILED) != 0) { break; }
++		IODelay(100);
++	}
++	uint32_t hfi_status = rd(g, GMU_HFI_CTRL_STATUS);
++	uint32_t hfi_ver    = rd(g, GMU_HFI_VERSION_INFO);
++	uint32_t intr       = rd(g, GMU_GMU2HOST_INTR_INFO);
++	printf("SWEET GPU: G4d-c cm3_fw_init_result=0x%08x hfi_ctrl_status=0x%08x hfi_version=0x%08x gmu2host_intr=0x%08x\n",
++	    r, hfi_status, hfi_ver, intr);
++	if ((r & GMU_STARTED_MASK) == GMU_STARTED || r == 0xbabefaceu) {
++		printf("SWEET GPU: G4d-c *** GMU BOOTED WITH HFI CONFIGURED *** (fw 0x%08x, hfi version 0x%08x). Next: G4d-d (CTRL_INIT + send a message).\n",
++		    r, hfi_ver);
++	} else {
++		printf("SWEET GPU: G4d-c GMU did not start with HFI (0x%08x) - recoverable, reboot. Compare against the G4c minimal boot.\n", r);
+ 	}
+ }
+ 
+@@ -734,14 +849,17 @@ SweetGPU::start(IOService *provider)
+ 	if (enabled >= 5) {
+ 		sweet_gpu_g4b_load();
+ 	}
+-	if (enabled >= 6) {
+-		sweet_gpu_g4c_boot();
++	if (enabled >= 6 && enabled < 9) {
++		sweet_gpu_g4c_boot();           /* minimal boot; G4d-c takes the boot itself at >=9 */
+ 	}
+ 	if (enabled >= 7) {
+ 		sweet_gpu_g4d_smmu_probe();
+ 	}
+-	if (enabled >= 8) {
+-		sweet_gpu_g4d_setup();
++	if (enabled == 8) {
++		sweet_gpu_g4d_setup();          /* standalone context test */
++	}
++	if (enabled >= 9) {
++		sweet_gpu_g4d_hfi();            /* context + HFI table + configured boot */
+ 	}
+ 	return true;
+ }

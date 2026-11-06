@@ -1289,7 +1289,28 @@ but the GMU booted WITHOUT this context, so verify whether HFI works with an aft
 whether the whole thing must be set up pre-boot (reorder G4d-b before G4c). fsr=0x400: decode before HFI
 (bit10) in case it means something once the GMU DMAs.
 
-### G4d-c plan (NEXT): HFI handshake - fill the queue table + ring the GMU
+### G4d-c built (2026-11-06, patch 0114, sweetgpu=9): context + HFI table + CONFIGURED boot
+KEY INSIGHT: the HFI/log registers must be set BEFORE the core leaves reset (the fw latches QTBL_ADDR at
+init) - so G4d-c isn't an append to G4c; it TAKES the boot. At sweetgpu>=9, G4c (minimal boot) is GATED OFF
+(enabled<9) so the core stays in reset from G4b, and sweet_gpu_g4d_hfi() runs instead. Refactored the G4d-b
+body into gmu_build_context(&buffers) (shared by G4d-b and G4d-c). G4d-b setup now maps 10 pages (was 7):
+2 dummy + 4 log (0x60002000) + 4 HFI (0x60006000, 16K - the 3 queues need it). sweet_gpu_g4d_hfi():
+  1. verify core in reset; gmu_build_context() -> context live + buffers.
+  2. lay hfi_table in the HFI region (kernel VA, to_memory flush): words, first_queue=6, queue_words,
+     queues=active=3; 3 queue descriptors {status=1, start=iova+HFI_QUEUE_AT(i), type=i|prio<<8, words=1024},
+     prio {10,10,40}.
+  3. wake RPMh; full register config INCLUDING HFI_QTBL_ADDR=0x60006000, QTBL_INFO=1, HFI_SFR_ADDR=GMU_CHIP,
+     PWR_COL_CP_MSG=log iova|(pages-1); all while core in reset.
+  4. release CM3, poll fw_init_result; read HFI_CTRL_STATUS / HFI_VERSION_INFO / GMU2HOST_INTR.
+NOT yet written: HFI_CTRL_INIT + the actual message send (that's G4d-d). SUCCESS = babeface WITH HFI
+configured + hfi_version non-zero / ctrl_status meaningful. aarch64 cross-compile clean; blob chain
+352fc58 (=0113) -> applies in sequence. Committed+pushed, CI pending.
+TEST: build sweetgpu=9, boot variant 5 to lock screen, pull ring, grep -aE "G4d-c|G4d-ctx".
+If the GMU does NOT reach babeface with HFI configured (but did at G4c minimal): a config value or the
+HFI table layout is off; compare register-by-register with the working G4c path + HakiOS. The fsr=0x400
+on the context is still unexplained (benign so far); watch it once the GMU DMAs the HFI table.
+
+### G4d-c-old plan (superseded by 0114): HFI handshake - fill the queue table + ring the GMU
 Now the context is live: in the mapped HFI page (gmu_hfi, iova 0x60006000, block_uncached view), build the
 hfi_table (words, queue_words, queues=active=3, 3 hfi_queue entries at GMU_HFI_ADDRESS+HFI_QUEUE_AT(i),
 priorities {10,10,40}, read/write index 0, words 1024). Then by GMU regs: HFI_QTBL_ADDR=0x60006000,

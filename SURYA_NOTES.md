@@ -1261,6 +1261,22 @@ CTRL_INIT=1, poll HFI_CTRL_STATUS. If the context is rejected: try context 0/oth
 secure path. NOTE on ordering: G4c already booted the GMU (babeface) before this runs; HakiOS sets the context
 up BEFORE firmware boot. If the GMU ignores an after-the-fact context at G4d-c, reorder so G4d-b runs pre-boot.
 
+### G4d-b result (2026-11-06, patch 0112, sweetgpu=8, CI 42288774529): context programmed, SMR refused
+NO HANG - all SMMU writes went through the smmu_wr asm-str path. Readback:
+  - cbar=0x1f300 (wrote 0x1f300) OK; sctlr=0x1027 M=1 (wrote 0x1027) OK; ttbr0=0x1000104050000 OK;
+    s2cr=0x00000001 (translate->ctx1) OK.  == the whole context bank + S2CR took ==
+  - smr=0x00000000 (wrote 0x84000005 = valid|mask0x400|sid5) REFUSED - reads back 0. fsr=0x400 (a status
+    bit, not in the fault mask; no real fault fired).
+ROOT CAUSE (from the device trees): surya's GPU SMMU is a DEDICATED qcom,smmu-v2 (live.dts arm,smmu-kgsl@
+5040000, phandle 0x1cc, NO qcom,skip-init, qcom,hyp_secure_alloc) - NOT the apps qsmmu-v500. Mainline
+sm7150.dtsi: adreno_smmu has #iommu-cells=<1> (SID only, no mask); gpu iommus=<&adreno_smmu 0 0x0>,
+**gmu iommus=<&adreno_smmu 5>** => GMU is SID 5, MASK 0 (exact match). HakiOS's mask 0x400 is SM7325's
+2-cell qsmmu-v500 binding. Writing an unused mask bit (0x400) made this SMMU drop the whole SMR write.
+FIX = patch 0113 (sweetgpu=8): GMU_SMMU_MASK 0x400 -> 0x0, so SMR = valid|sid5 = 0x80000005. One value,
+DT-grounded. If mask 0 STILL reads back 0, the SMR is TZ-owned after all and we go secure (SCM) or find
+which SMR slot TZ reserved; but no-skip-init + kgsl-manages-it strongly implies HLOS may write it.
+EXPECT next: readback smr=0x80000005, "*** GMU SMMU CONTEXT IS LIVE ***".
+
 ### G4d plan (NEXT): HFI - let the kernel talk to the running GMU
 Now the GMU runs, the next real step is HFI (Host-Firmware Interface): the message channel the kernel uses to
 ask the GMU to power the GX domain, set GPU freq (DCVS), and eventually accept CP submissions. Needs: a GMU

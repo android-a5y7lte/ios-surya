@@ -1,0 +1,17 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 44d8b13..352fc58 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -562,8 +562,10 @@ sweet_gpu_g4d_smmu_probe(void)
+ #define PTE_GMU             (PTE_SHARED | PTE_ACCESSED | PTE_NOT_GLOBAL) /* GMU accesses: privileged, uncached */
+ /* the GMU's view (mainline a6xx_gmu) */
+ #define GMU_CTX             1u          /* SMMU context bank for the GMU (0 kept for the 3D core) */
+-#define GMU_SMMU_STREAM     5u          /* dt iommus: the GMU's stream id */
+-#define GMU_SMMU_MASK       0x400u      /* dt iommus: the mask cell */
++#define GMU_SMMU_STREAM     5u          /* surya mainline dt: gmu iommus = <&adreno_smmu 5> */
++#define GMU_SMMU_MASK       0x0u        /* adreno_smmu #iommu-cells=1 => no mask cell, exact SID match
++                                         * (HakiOS's 0x400 is SM7325's 2-cell binding; writing an
++                                         * unused mask bit made this SMMU drop the whole SMR write) */
+ #define GMU_SMMU_MATCH      1u          /* stream-table entry to use (0 kept for the 3D core) */
+ #define GMU_IOVA_BASE       0x60000000u /* L1=1 L2=0 L3=0; the 7 pages are L3[0..6] */
+ #define GMU_MAP_PAGES       7u          /* 2 dummy + 4 log + 1 hfi */

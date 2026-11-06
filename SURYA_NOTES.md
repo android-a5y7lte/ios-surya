@@ -1319,7 +1319,27 @@ the GMU only populates those after we write HFI_CTRL_INIT=1 and it processes the
 confirms no message yet from GMU. Observation (minor): rscc_control_ack=0 (same as G4c minimal boot); the
 firmware boots anyway on this SoC - mark for later, not a blocker.
 
-### G4d-d built (2026-11-06, patch 0115, sweetgpu=10): ring HFI_CTRL_INIT and watch the GMU
+### G4d-d result (2026-11-07 00:15, patch 0115, sweetgpu=10): CTRL_INIT accepted, handshake INCOMPLETE
+HFI_CTRL_STATUS 0x0 -> **0x000000fe** after writing CTRL_INIT=1. Firmware DID respond (status changed),
+but bit 0 (INIT_COMPLETE) is NOT set. hfi_version=0, gmu2host_intr=0, fw still babeface (healthy).
+INTERPRETATION (most likely, matching vendor kgsl a6xx_hfi.c): CTRL_INIT=1 only ARMS HFI processing;
+the firmware then waits for a GMU_INIT packet on q0 (host->gmu) + a HOST2GMU_INTR_SET ring, and only
+after a valid message exchange sets bit 0 and acks on q1. 0xFE would then mean "armed, waiting for
+first message". Two weaker hypotheses: queue layout off (mesa uses page-aligned queues at 0x1000/0x2000
+/0x3000; we used the HakiOS compact layout at 0x350/0x1350/0x2350), or 0xFE is an error marker from
+firmware init. Strongest next test: send the GMU_INIT message (which falsifies hyp.1 immediately if it
+succeeds).
+
+### G4d-e plan (NEXT): send the first F2H message (GMU_INIT) and complete the handshake
+Vendor a6xx_hfi_send_gmu_init: build H2F_MSG_INIT packet (header: id|size|type, payload: boot_state),
+write it into queue 0 at [write*4], advance queue 0 write index, ring GMU_HOST2GMU_INTR_SET=1, poll
+GMU_GMU2HOST_INTR_INFO for an incoming message bit, then read q1 (gmu->host) at [read*4] for the
+ACK and advance q1 read index. For CPU<->GMU shared memory access we need block_uncached (an
+ml_io_map_wcomb() view of the HFI buffer phys range), because the GMU writes directly to memory the
+CPU must see freshly. Message format: a6xx_hfi.h HFI_MSG_INIT + friends. Reference: vendor
+adreno_a6xx_hfi.c a6xx_hfi_send_gmu_init / a6xx_hfi_queue_write / a6xx_hfi_queue_read. If bit 0 of
+HFI_CTRL_STATUS then sets => *** HFI IS FULLY ALIVE ***. If 0xFE persists after a well-formed message
+=> queue layout IS wrong, re-try with mesa-style page-aligned queues at 0x1000/0x2000/0x3000.
 sweet_gpu_g4d_hfi() now takes a bool; at sweetgpu>=10 after babeface it runs the G4d-d tail: clears
 GMU2HOST_INTR latch, writes GMU_HFI_CTRL_INIT=1, polls HFI_CTRL_STATUS bit 0 for ~100 ms, re-reads
 HFI_VERSION_INFO + GMU2HOST_INTR_INFO + fw_init_result. On bit 0 set: *** HFI IS ALIVE ***. aarch64

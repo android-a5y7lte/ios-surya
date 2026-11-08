@@ -1,0 +1,44 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 968ecce..08bdc62 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -21,6 +21,7 @@
+  *   sweetgpu>=10 +G4d-d: ring HFI_CTRL_INIT and watch the GMU bring HFI up (patch 0115).
+  *   sweetgpu>=11 +G4d-e: send GMU_INIT on q0, poll q1 for the first ack (patch 0116).
+  *               +page-aligned queue layout + CM3_FAULT / SMMU FSR decode (patch 0117).
++ *               +pad messages to 4-dword slots with 0xfafafafa, non-zero seq (patch 0118).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -860,17 +861,27 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	volatile struct hfi_table *hfi_u = (volatile struct hfi_table *)hfi_unc;
+ 	volatile uint32_t *q0_data = (volatile uint32_t *)(hfi_unc + HFI_QUEUE_AT(0));
+ 	volatile uint32_t *q1_data = (volatile uint32_t *)(hfi_unc + HFI_QUEUE_AT(1));
++	/* HakiOS hfi_send: pad every message to a 4-dword (16-byte) slot with 0xfafafafa
++	 * fillers and advance queue->write by the PADDED length. The firmware parses the
++	 * queue in 16-byte slots: an unaligned write index makes it parse dword 5 as the
++	 * next message header, and a zero word there turns into id=0 size=0 which crashes
++	 * the CM3 (matches last run: CM3_FAULT without SMMU activity). Also use a non-zero
++	 * sequence number (HakiOS starts at 1): bits 20-31 of the header. */
+ 	uint32_t w0 = hfi_u->queue[0].write;
+-	uint32_t hdr = 0x01u | (5u << 8) | (0u << 16); /* id=GMU_INIT|size=5|type=CMD */
++	uint32_t seq = 1u;
++	uint32_t hdr = 0x01u | (5u << 8) | (0u << 16) | (seq << 20); /* id=INIT|size=5|type=CMD|seq=1 */
+ 	q0_data[w0 + 0u] = hdr;
+ 	q0_data[w0 + 1u] = 0u;             /* seg_id */
+ 	q0_data[w0 + 2u] = 0u;             /* dbg_buf_addr */
+ 	q0_data[w0 + 3u] = 0u;             /* dbg_buf_size */
+ 	q0_data[w0 + 4u] = 0u;             /* boot_state = cold */
+-	hfi_u->queue[0].write = w0 + 5u;
++	q0_data[w0 + 5u] = 0xfafafafau;    /* pad to 4-dword slot boundary (vendor expects it) */
++	q0_data[w0 + 6u] = 0xfafafafau;
++	q0_data[w0 + 7u] = 0xfafafafau;
++	hfi_u->queue[0].write = w0 + 8u;   /* advance by PADDED length, not message length */
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+-	printf("SWEET GPU: G4d-e wrote GMU_INIT hdr=0x%08x at q0[w=%u], new write=%u\n",
+-	    hdr, w0, w0 + 5u);
++	printf("SWEET GPU: G4d-e wrote GMU_INIT hdr=0x%08x at q0[w=%u], new write=%u (padded 5->8 dwords)\n",
++	    hdr, w0, w0 + 8u);
+ 
+ 	/* ring the GMU: bit 0 of HOST2GMU_INTR_SET = "message waiting for you" */
+ 	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);  /* clear any stale latch */

@@ -1344,7 +1344,28 @@ Three hypotheses (ranked):
     need to vote and fault on failure. Bigger patch (need to map surya RSCC + vote-sequence setup).
  3. Missing power config (PWR_COL_INTER_FRAME_HYST, SPTPRAC_HYST) mesa writes before HFI start. Less
     likely to fault specifically.
-### G4d-e built #2 (2026-11-08, patch 0117, sweetgpu=11): mesa page-aligned queues + CM3/FSR decode
+### G4d-e result #2 (2026-11-08 15:40, patch 0117, sweetgpu=11): page-aligned queues took, SAME fault
+Queue addresses now page-aligned exactly as expected (q0=0x60007000 q1=0x60008000 q2=0x60009000). But:
+CTRL_STATUS still 0xfe, intr_info still 0x00800000 (CM3_FAULT bit 23), SMMU FSR unchanged 0x400 (= same
+pre-boot status bit, NOT a fault; FAR=0, FSYNR0=0). So the firmware crashes BEFORE DMAing our message
+via SMMU - layout was not the issue. Diagnostic FSR re-read worked as designed; cleanly rules out SMMU.
+ROOT CAUSE (strong, from HakiOS hfi_send): HFI messages must be PADDED TO 4-DWORD (16-byte) SLOT
+BOUNDARIES with 0xfafafafa fillers, and queue->write must advance by the padded length. We wrote 5
+dwords for GMU_INIT and advanced write by 5. Firmware parses the queue in 16-byte slots: dword 5 is
+read as the next message header, dword 5 is 0 (buffer zeroed) => id=0 size=0 => CM3 jumps/faults.
+Matches the symptom exactly (CM3_FAULT, no SMMU activity).
+### G4d-e built #3 (2026-11-08, patch 0118, sweetgpu=11): pad to 4-dword slot + non-zero seq
+Pad GMU_INIT from 5 to 8 dwords (w0+5..w0+7 = 0xfafafafa), advance queue[0].write by 8 not 5. Also set
+sequence=1 in header bits 20-31 (HakiOS starts at 1; firmware MAY care). hdr becomes 0x00100501 instead
+of 0x00000501. One-paragraph change (~15 lines). aarch64 cross-compile clean, chain 968ecce -> 08bdc62.
+TEST: build sweetgpu=11, same boot/pull/grep as before.
+EXPECT best: *** HFI HANDSHAKE SUCCEEDED *** (no CM3_FAULT, q1_write non-zero, HFI_VERSION_INFO set,
+ctrl_status bit 0 set). We would be at HFI two-way messaging and the unlock for everything after.
+EXPECT also-informative: CM3_FAULT still set but with q1_write non-zero => firmware DID answer before
+crashing on something else; the ack packet tells us what went wrong.
+If still same fault: investigate RSCC voting (hyp.2) - map surya RSCC block, do minimal vote sequence.
+
+### G4d-e-old plan (NEXT): send the first F2H message (GMU_INIT) and complete the handshake
 HFI_QUEUE_AT(n) = 4096*(1+n) instead of 848+4096*n => queues at HFI+0x1000/0x2000/0x3000, each own page.
 G4d-e tail now ALSO: (a) prints "CM3_FAULT - GMU ran our handler and crashed" when intr_info bit 23 set;
 (b) re-reads SMMU context-bank FSR/FAR/FSYNR0 after the fault to distinguish firmware-internal fault

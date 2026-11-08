@@ -1,0 +1,87 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 5073de5..232b882 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -25,7 +25,7 @@
+  *   sweetgpu>=12 +G4d-f (TEST):     skip CTRL_INIT, send HFI_TEST (id 0x05) - diagnostic (0119).
+  *   sweetgpu>=13 +G4d-f (GMU_INIT): skip CTRL_INIT, send GMU_INIT (id 0x01) - diagnostic (0119).
+  *   sweetgpu>=14 +G4d-g (PDC+CTRL_INIT+GMU_INIT): enable PDC first, then CTRL_INIT=1, then send (0120).
+- *               +PDC/PDC_SEQ dump to see what AOP pre-programmed (patch 0121).
++ *   sweetgpu>=15 +G4d-h (+SEQ write): also write the 5-word PDC seq program (patch 0122).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -847,8 +847,8 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	 * CM3_FAULT goes away, CTRL_INIT itself is what crashes the firmware. */
+ 	if (stage >= 5) {
+ 		/* G4d-g: HakiOS step_gmu_queues - enable the GPU's part of the always-on
+-		 * PDC sequencer so the GMU firmware's HFI init can complete, THEN write
+-		 * HFI_CTRL_INIT=1. */
++		 * PDC sequencer, (stage 6) write the 5-word PDC sequence program, THEN
++		 * write HFI_CTRL_INIT=1. */
+ 		vm_offset_t p = ml_io_map(GMU_PDC_PA, GMU_PDC_SIZE);
+ 		uint32_t en0 = rd(p, PDC_GPU_ENABLE);
+ 		uint32_t sa0 = rd(p, PDC_GPU_SEQ_START_ADDR);
+@@ -859,23 +859,26 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		printf("SWEET GPU: G4d-g PDC enable: before start_addr=0x%08x enable=0x%08x -> after start_addr=0x%08x enable=0x%08x\n",
+ 		    sa0, en0, sa1, en1);
+ 
+-		/* Diagnostic dump: is the PDC_SEQ RAM pre-programmed by AOP? If yes, non-zero
+-		 * instructions will show; if zero, we need to write the sequence ourselves.
+-		 * Dump the first 16 dwords of PDC_SEQ at a few candidate base offsets. */
+-		vm_offset_t pseq = ml_io_map(GMU_PDC_SEQ_PA, GMU_PDC_SEQ_SIZE);
+-		for (uint32_t off = 0; off < 0x100u; off += 32u) {
+-			printf("SWEET GPU: G4d-g PDC_SEQ+0x%04x: %08x %08x %08x %08x %08x %08x %08x %08x\n", off,
+-			    rd(pseq, off),      rd(pseq, off+4),  rd(pseq, off+8),  rd(pseq, off+12),
+-			    rd(pseq, off+16),   rd(pseq, off+20), rd(pseq, off+24), rd(pseq, off+28));
++		if (stage >= 6) {
++			/* G4d-h: write the GMU-side PDC sequence program. On HakiOS (SM7325)
++			 * this 5-word program lives in the RSCC block at SEQ_MEM_0_DRV0. On
++			 * surya (SM7150) there is no separate RSCC; the equivalent storage
++			 * is in gmu_pdc_seq. Vendor kgsl puts SEQ_RAM at offset 0x4000.
++			 * WRITE ONLY - reading PDC_SEQ from the shim panics the kernel
++			 * (patch 0121 got a data abort at PDC_SEQ+0x4000). The hypervisor
++			 * evidently traps the read; writes should go straight through. */
++			static const uint32_t pdc_program[5] = {
++			    0xeaaae5a0u, 0xe1a1ebabu, 0xa2e0a581u, 0xecac82e2u, 0x0020edadu
++			};
++			vm_offset_t pseq = ml_io_map(GMU_PDC_SEQ_PA, GMU_PDC_SEQ_SIZE);
++			for (uint32_t i = 0; i < 5u; i++) {
++				wr(pseq, 0x4000u + 4u * i, pdc_program[i]);
++			}
++			__asm__ volatile ("dsb sy" ::: "memory");
++			printf("SWEET GPU: G4d-h wrote PDC seq program (5 words, HakiOS values) to PDC_SEQ+0x4000\n");
+ 		}
+-		/* Also PDC_CFG around the enable area + known downstream SEQ_RAM offset 0x4000 */
+-		printf("SWEET GPU: G4d-g PDC_CFG+0x4500: %08x %08x PDC_CFG+0x4520: %08x %08x\n",
+-		    rd(p, 0x4500u), rd(p, 0x4504u), rd(p, 0x4520u), rd(p, 0x4524u));
+-		printf("SWEET GPU: G4d-g PDC_SEQ+0x4000 (vendor SEQ_RAM): %08x %08x %08x %08x %08x %08x %08x %08x\n",
+-		    rd(pseq, 0x4000u), rd(pseq, 0x4004u), rd(pseq, 0x4008u), rd(pseq, 0x400cu),
+-		    rd(pseq, 0x4010u), rd(pseq, 0x4014u), rd(pseq, 0x4018u), rd(pseq, 0x401cu));
+ 	}
+-	if (stage == 1 || stage == 2 || stage >= 5) {
++	if (stage == 1 || stage == 2 || stage == 5 || stage == 6) {
+ 		printf("SWEET GPU: G4d-d ring HFI_CTRL_INIT=1 and watch the GMU answer\n");
+ 		wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
+ 		wr(g, GMU_HFI_CTRL_INIT, 1);
+@@ -912,7 +915,8 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	const char *stage_label = (stage == 2) ? "G4d-e"
+ 	    : (stage == 3) ? "G4d-f(TEST, no CTRL_INIT)"
+ 	    : (stage == 4) ? "G4d-f(GMU_INIT, no CTRL_INIT)"
+-	    : (stage == 5) ? "G4d-g(PDC+CTRL_INIT+GMU_INIT)" : "G4d-?";
++	    : (stage == 5) ? "G4d-g(PDC+CTRL_INIT+GMU_INIT)"
++	    : (stage == 6) ? "G4d-h(PDC+SEQ+CTRL_INIT+GMU_INIT)" : "G4d-?";
+ 	printf("SWEET GPU: %s send %s on q0 and poll q1 for the GMU's ack\n", stage_label, send_name);
+ 	uint64_t hfi_phys = kvtophys(hfi_kva);
+ 	vm_offset_t hfi_unc = ml_io_map_wcomb((vm_offset_t)hfi_phys,
+@@ -1052,8 +1056,8 @@ SweetGPU::start(IOService *provider)
+ 		sweet_gpu_g4d_setup();          /* standalone context test */
+ 	}
+ 	if (enabled >= 9) {
+-		int stage = enabled - 9; /* 9->0 c; 10->1 d; 11->2 e; 12-13 f; 14->5 g (PDC+CTRL_INIT+send) */
+-		if (stage > 5) { stage = 5; }
++		int stage = enabled - 9; /* 9->0 c; 10->1 d; 11->2 e; 12-13 f; 14->5 g; 15->6 h (+SEQ write) */
++		if (stage > 6) { stage = 6; }
+ 		sweet_gpu_g4d_hfi(stage);
+ 	}
+ 	return true;

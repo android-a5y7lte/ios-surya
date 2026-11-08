@@ -1381,7 +1381,27 @@ the GPU PDC was in a pre-init state when our shim took over). OR the sequence IS
 firmware also needs the RSCC seq program analog that we skipped. Next diagnostic: dump the PDC_SEQ
 contents to see which case we are in.
 
-### G4d-g built #2 (2026-11-08, patch 0121, sweetgpu=14): PDC/PDC_SEQ dump diagnostic
+### G4d-g result #2 (2026-11-08 17:18, patch 0121, sweetgpu=14): KERNEL PANIC on PDC_SEQ read
+Reading gmu_pdc_seq (0xb490000) from the shim panics the kernel: Data abort, ESR=0x96000010 (translation
+fault level 0), FAR=0xffffffe100a398060 (in the ml_io_mapped range). Panic subtitle "handshake structure
+not initialized". Hypervisor almost certainly traps reads to PDC_SEQ offsets, deadlocks, and the recovery
+path kernel-faults. This is actually INFORMATIVE: PDC_SEQ is behind a tighter hypervisor guard than
+plain GMU registers. Writes may still land.
+
+### G4d-h built (2026-11-08, patch 0122, sweetgpu=15): write the 5-word PDC seq program (write-only)
+Removed the dangerous read-dump; stage 5 (PDC enable) reverted to exactly the 0120 behavior. NEW stage 6
+(sweetgpu=15): PDC enable + write HakiOS's 5-word program {0xeaaae5a0, 0xe1a1ebab, 0xa2e0a581,
+0xecac82e2, 0x0020edad} to PDC_SEQ+0x4000 (vendor kgsl's SEQ_RAM base) + dsb + CTRL_INIT=1 + send
+GMU_INIT. NO reads of PDC_SEQ (avoids the kernel panic). HakiOS values are for SM7325 but the a6xx GMU
+HFI handshake code is likely common; if values are wrong for a618 we expect the same 0xfe wall, not a
+new fault pattern.
+aarch64 cross-compile clean, chain 5073de5 -> 232b882.
+TEST: build sweetgpu=15, boot variant 5 to lock screen, pull ring, grep -aE "G4d-g|G4d-h".
+EXPECT best: *** HFI HANDSHAKE SUCCEEDED ***. The 5-word program unlocks HFI completion.
+EXPECT also-informative: PDC seq write message prints (no panic), then same 0xfe CTRL_STATUS + CM3_FAULT.
+Means: these values arent right for a618, need to find the correct SM7150 values (vendor kgsl or mesa).
+ALSO possible: another panic. Means writes also trap; we would need the hypervisor-safe asm store form
+or a completely different approach.
 Same PDC enable as 0120, PLUS: map gmu_pdc_seq (0xb490000, 0x10000) and dump the first 0x100 bytes
 in 8-dword rows, plus PDC_CFG at 0x4500/0x4504/0x4520/0x4524, plus PDC_SEQ+0x4000 (where vendor kgsl's
 SEQ_RAM typically lives). This tells us:

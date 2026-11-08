@@ -1,0 +1,162 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 232b882..0fc2cc5 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -25,7 +25,8 @@
+  *   sweetgpu>=12 +G4d-f (TEST):     skip CTRL_INIT, send HFI_TEST (id 0x05) - diagnostic (0119).
+  *   sweetgpu>=13 +G4d-f (GMU_INIT): skip CTRL_INIT, send GMU_INIT (id 0x01) - diagnostic (0119).
+  *   sweetgpu>=14 +G4d-g (PDC+CTRL_INIT+GMU_INIT): enable PDC first, then CTRL_INIT=1, then send (0120).
+- *   sweetgpu>=15 +G4d-h (+SEQ write): also write the 5-word PDC seq program (patch 0122).
++ *   sweetgpu>=15 +G4d-h (+SEQ write): wrote 5-word prog to wrong offset (patch 0122, kept for ref).
++ *   sweetgpu>=16 +G4d-i: COMPLETE a618 RPMH init (RSCC + PDC_SEQ ucode + TCS1/TCS3 banks) (0123).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -537,8 +538,36 @@ sweet_gpu_g4d_smmu_probe(void)
+ #define GMU_PDC_SIZE            0x00010000u
+ #define GMU_PDC_SEQ_PA          0x0b490000u      /* surya dt: "kgsl_gmu_pdc_seq" */
+ #define GMU_PDC_SEQ_SIZE        0x00010000u
+-#define PDC_GPU_ENABLE          (4u * 0x1140u)   /* 0x4500 */
+-#define PDC_GPU_SEQ_START_ADDR  (4u * 0x1148u)   /* 0x4520 */
++/* RSCC on a618 lives INSIDE the GMU mmio at offset 0x23000 (mainline a6xx_gmu.c line 2466:
++ *   gmu->rscc = gmu->mmio + 0x23000;
++ * for pre-a650 / non-a8xx). Our GMU map (size 0x34000) already covers it. gmu_write_rscc()
++ * uses writel(value, gmu->rscc + (offset << 2)), so word offsets become byte*4 below. */
++#define GMU_RSCC_OFFSET                         0x23000u
++#define RSCC_GPU_RSC_STATUS0_DRV0               (GMU_RSCC_OFFSET + 4u * 0x004u) /* 0x23010 */
++#define RSCC_PDC_SEQ_START_ADDR                 (GMU_RSCC_OFFSET + 4u * 0x008u) /* 0x23020 */
++#define RSCC_PDC_MATCH_VALUE_LO                 (GMU_RSCC_OFFSET + 4u * 0x009u) /* 0x23024 */
++#define RSCC_PDC_MATCH_VALUE_HI                 (GMU_RSCC_OFFSET + 4u * 0x00au) /* 0x23028 */
++#define RSCC_PDC_SLAVE_ID_DRV0                  (GMU_RSCC_OFFSET + 4u * 0x00bu) /* 0x2302c */
++#define RSCC_HIDDEN_TCS_CMD0_ADDR               (GMU_RSCC_OFFSET + 4u * 0x00du) /* 0x23034 */
++#define RSCC_HIDDEN_TCS_CMD0_DATA               (GMU_RSCC_OFFSET + 4u * 0x00eu) /* 0x23038 */
++#define RSCC_OVERRIDE_START_ADDR                (GMU_RSCC_OFFSET + 4u * 0x100u) /* 0x23400 */
++#define RSCC_SEQ_MEM_0_DRV0                     (GMU_RSCC_OFFSET + 4u * 0x180u) /* 0x23600 */
++/* PDC_CFG (0xb290000) register offsets, word-indexed * 4 (pdc_write) */
++#define PDC_GPU_ENABLE                          (4u * 0x1140u) /* 0x4500 */
++#define PDC_GPU_SEQ_START_ADDR                  (4u * 0x1148u) /* 0x4520 */
++#define PDC_GPU_TCS1_CONTROL                    (4u * 0x1572u) /* 0x55c8 */
++#define PDC_GPU_TCS1_CMD_ENABLE_BANK            (4u * 0x1573u) /* 0x55cc */
++#define PDC_GPU_TCS1_CMD_WAIT_FOR_CMPL_BANK     (4u * 0x1574u) /* 0x55d0 */
++#define PDC_GPU_TCS1_CMD0_MSGID                 (4u * 0x1575u) /* 0x55d4 */
++#define PDC_GPU_TCS1_CMD0_ADDR                  (4u * 0x1576u) /* 0x55d8 */
++#define PDC_GPU_TCS1_CMD0_DATA                  (4u * 0x1577u) /* 0x55dc */
++#define PDC_GPU_TCS3_CONTROL                    (4u * 0x15d6u) /* 0x5758 */
++#define PDC_GPU_TCS3_CMD_ENABLE_BANK            (4u * 0x15d7u) /* 0x575c */
++#define PDC_GPU_TCS3_CMD_WAIT_FOR_CMPL_BANK     (4u * 0x15d8u) /* 0x5760 */
++#define PDC_GPU_TCS3_CMD0_MSGID                 (4u * 0x15d9u) /* 0x5764 */
++#define PDC_GPU_TCS3_CMD0_ADDR                  (4u * 0x15dau) /* 0x5768 */
++#define PDC_GPU_TCS3_CMD0_DATA                  (4u * 0x15dbu) /* 0x576c */
++#define A618_PDC_ADDRESS_OFFSET                 0x30090u
+ 
+ /* ---- G4d-b: give the GMU its own SMMU context so it can reach shared memory ------
+  * G4d-a found the GPU SMMU in pure reset - every stream faults, no live context.
+@@ -859,26 +888,74 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		printf("SWEET GPU: G4d-g PDC enable: before start_addr=0x%08x enable=0x%08x -> after start_addr=0x%08x enable=0x%08x\n",
+ 		    sa0, en0, sa1, en1);
+ 
+-		if (stage >= 6) {
+-			/* G4d-h: write the GMU-side PDC sequence program. On HakiOS (SM7325)
+-			 * this 5-word program lives in the RSCC block at SEQ_MEM_0_DRV0. On
+-			 * surya (SM7150) there is no separate RSCC; the equivalent storage
+-			 * is in gmu_pdc_seq. Vendor kgsl puts SEQ_RAM at offset 0x4000.
+-			 * WRITE ONLY - reading PDC_SEQ from the shim panics the kernel
+-			 * (patch 0121 got a data abort at PDC_SEQ+0x4000). The hypervisor
+-			 * evidently traps the read; writes should go straight through. */
+-			static const uint32_t pdc_program[5] = {
+-			    0xeaaae5a0u, 0xe1a1ebabu, 0xa2e0a581u, 0xecac82e2u, 0x0020edadu
++		if (stage >= 7) {
++			/* G4d-i: COMPLETE a618 RPMH/RSCC/PDC init, port of mainline a6xx_gmu.c
++			 * a6xx_gmu_rpmh_init(). For a618: not pdc_in_aop, pdc_address_offset
++			 * 0x30090, RSCC lives at GMU_mmio+0x23000. Values from the generated
++			 * a6xx*.xml.h. All write-only (reads to PDC_SEQ panic the kernel). */
++			static const uint32_t rscc_seq_a618[5] = {
++			    0xa7a506a0u, 0xa1e6a6e7u, 0xa2e081e1u, 0xe9a982e2u, 0x0020e8a8u
++			};
++			static const uint32_t pdc_seq_a618[5] = {
++			    0xfebea1e1u, 0xa5a4a3a2u, 0x8382a6e0u, 0xbce3e284u, 0x002081fcu
+ 			};
+ 			vm_offset_t pseq = ml_io_map(GMU_PDC_SEQ_PA, GMU_PDC_SEQ_SIZE);
++			printf("SWEET GPU: G4d-i FULL a618 RPMH init (RSCC@gmu+0x23000, PDC_CFG@0xb290000, PDC_SEQ@0xb490000)\n");
++
++			/* RSCC side: these go to gmu+0x23000..+0x23600, using regular wr() */
++			wr(g, RSCC_GPU_RSC_STATUS0_DRV0, 1u << 24);           /* disable SDE clock gating */
++			wr(g, RSCC_PDC_SLAVE_ID_DRV0, 1u);
++			wr(g, RSCC_HIDDEN_TCS_CMD0_DATA + 0u, 0u);            /* CMD0 data (DATA and ADDR are */
++			wr(g, RSCC_HIDDEN_TCS_CMD0_ADDR + 0u, 0u);            /* interleaved, one word each,  */
++			wr(g, RSCC_HIDDEN_TCS_CMD0_DATA + 4u * 2u, 0u);       /* so + 2 words = next CMD)      */
++			wr(g, RSCC_HIDDEN_TCS_CMD0_ADDR + 4u * 2u, 0u);
++			wr(g, RSCC_HIDDEN_TCS_CMD0_DATA + 4u * 4u, 0x80000000u); /* a618 (not a740/a722) */
++			wr(g, RSCC_HIDDEN_TCS_CMD0_ADDR + 4u * 4u, 0u);
++			wr(g, RSCC_OVERRIDE_START_ADDR, 0u);
++			wr(g, RSCC_PDC_SEQ_START_ADDR, 0x4520u);
++			wr(g, RSCC_PDC_MATCH_VALUE_LO, 0x4510u);
++			wr(g, RSCC_PDC_MATCH_VALUE_HI, 0x4514u);
+ 			for (uint32_t i = 0; i < 5u; i++) {
+-				wr(pseq, 0x4000u + 4u * i, pdc_program[i]);
++				wr(g, RSCC_SEQ_MEM_0_DRV0 + 4u * i, rscc_seq_a618[i]);
+ 			}
++
++			/* PDC SEQ side: the GMU-side power-up/power-down ucode at PDC_SEQ offset 0 */
++			for (uint32_t i = 0; i < 5u; i++) {
++				wr(pseq, 4u * i, pdc_seq_a618[i]);
++			}
++
++			/* PDC CFG side: TCS1 bank 0 = wakeup sequence (3 commands) */
++			wr(p, PDC_GPU_TCS1_CMD_ENABLE_BANK, 7u);
++			wr(p, PDC_GPU_TCS1_CMD_WAIT_FOR_CMPL_BANK, 0u);
++			wr(p, PDC_GPU_TCS1_CONTROL, 0u);
++			wr(p, PDC_GPU_TCS1_CMD0_MSGID + 4u * 0u, 0x10108u);
++			wr(p, PDC_GPU_TCS1_CMD0_ADDR  + 4u * 0u, 0x30010u);
++			wr(p, PDC_GPU_TCS1_CMD0_DATA  + 4u * 0u, 1u);
++			wr(p, PDC_GPU_TCS1_CMD0_MSGID + 4u * 1u, 0x10108u);
++			wr(p, PDC_GPU_TCS1_CMD0_ADDR  + 4u * 1u, 0x30000u);
++			wr(p, PDC_GPU_TCS1_CMD0_DATA  + 4u * 1u, 0u);
++			wr(p, PDC_GPU_TCS1_CMD0_MSGID + 4u * 2u, 0x10108u);
++			wr(p, PDC_GPU_TCS1_CMD0_ADDR  + 4u * 2u, A618_PDC_ADDRESS_OFFSET);
++			wr(p, PDC_GPU_TCS1_CMD0_DATA  + 4u * 2u, 0u);
++
++			/* TCS3 bank 0 = sleep sequence (3 commands); a618 uses data=0x2 in slot 1 */
++			wr(p, PDC_GPU_TCS3_CMD_ENABLE_BANK, 7u);
++			wr(p, PDC_GPU_TCS3_CMD_WAIT_FOR_CMPL_BANK, 0u);
++			wr(p, PDC_GPU_TCS3_CONTROL, 0u);
++			wr(p, PDC_GPU_TCS3_CMD0_MSGID + 4u * 0u, 0x10108u);
++			wr(p, PDC_GPU_TCS3_CMD0_ADDR  + 4u * 0u, 0x30010u);
++			wr(p, PDC_GPU_TCS3_CMD0_DATA  + 4u * 0u, 2u);
++			wr(p, PDC_GPU_TCS3_CMD0_MSGID + 4u * 1u, 0x10108u);
++			wr(p, PDC_GPU_TCS3_CMD0_ADDR  + 4u * 1u, 0x30000u);
++			wr(p, PDC_GPU_TCS3_CMD0_DATA  + 4u * 1u, 0x2u);    /* a618/a619/a650 */
++			wr(p, PDC_GPU_TCS3_CMD0_MSGID + 4u * 2u, 0x10108u);
++			wr(p, PDC_GPU_TCS3_CMD0_ADDR  + 4u * 2u, A618_PDC_ADDRESS_OFFSET);
++			wr(p, PDC_GPU_TCS3_CMD0_DATA  + 4u * 2u, 0x3u);
+ 			__asm__ volatile ("dsb sy" ::: "memory");
+-			printf("SWEET GPU: G4d-h wrote PDC seq program (5 words, HakiOS values) to PDC_SEQ+0x4000\n");
++			printf("SWEET GPU: G4d-i wrote full RPMH init (RSCC seq+config, PDC_SEQ ucode, TCS1/TCS3 banks)\n");
+ 		}
+ 	}
+-	if (stage == 1 || stage == 2 || stage == 5 || stage == 6) {
++	if (stage == 1 || stage == 2 || stage == 5 || stage == 6 || stage == 7) {
+ 		printf("SWEET GPU: G4d-d ring HFI_CTRL_INIT=1 and watch the GMU answer\n");
+ 		wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
+ 		wr(g, GMU_HFI_CTRL_INIT, 1);
+@@ -916,7 +993,8 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	    : (stage == 3) ? "G4d-f(TEST, no CTRL_INIT)"
+ 	    : (stage == 4) ? "G4d-f(GMU_INIT, no CTRL_INIT)"
+ 	    : (stage == 5) ? "G4d-g(PDC+CTRL_INIT+GMU_INIT)"
+-	    : (stage == 6) ? "G4d-h(PDC+SEQ+CTRL_INIT+GMU_INIT)" : "G4d-?";
++	    : (stage == 6) ? "G4d-h(PDC+SEQ_wrong+CTRL_INIT+GMU_INIT)"
++	    : (stage == 7) ? "G4d-i(FULL_a618_RPMH+CTRL_INIT+GMU_INIT)" : "G4d-?";
+ 	printf("SWEET GPU: %s send %s on q0 and poll q1 for the GMU's ack\n", stage_label, send_name);
+ 	uint64_t hfi_phys = kvtophys(hfi_kva);
+ 	vm_offset_t hfi_unc = ml_io_map_wcomb((vm_offset_t)hfi_phys,
+@@ -1056,8 +1134,8 @@ SweetGPU::start(IOService *provider)
+ 		sweet_gpu_g4d_setup();          /* standalone context test */
+ 	}
+ 	if (enabled >= 9) {
+-		int stage = enabled - 9; /* 9->0 c; 10->1 d; 11->2 e; 12-13 f; 14->5 g; 15->6 h (+SEQ write) */
+-		if (stage > 6) { stage = 6; }
++		int stage = enabled - 9; /* 9..13 old; 14=g (PDC en); 15=h (wrong SEQ); 16=i (FULL a618 RPMH) */
++		if (stage > 7) { stage = 7; }
+ 		sweet_gpu_g4d_hfi(stage);
+ 	}
+ 	return true;

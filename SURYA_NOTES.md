@@ -1388,7 +1388,30 @@ not initialized". Hypervisor almost certainly traps reads to PDC_SEQ offsets, de
 path kernel-faults. This is actually INFORMATIVE: PDC_SEQ is behind a tighter hypervisor guard than
 plain GMU registers. Writes may still land.
 
-### G4d-h built (2026-11-08, patch 0122, sweetgpu=15): write the 5-word PDC seq program (write-only)
+### G4d-h result (2026-11-08 17:40, patch 0122, sweetgpu=15): seq write landed cleanly, SAME 0xfe wall
+PDC enable before=0 -> after=0x80000001 (took), PDC seq write prints cleanly (no panic -> writes to
+PDC_SEQ DO go through, unlike reads which trap+panic). Then: CTRL_STATUS=0xfe, intr_info=0x00800000
+(CM3_FAULT), no q1 answer. Same signature as all post-0120 attempts.
+CONCLUSION: the HakiOS SM7325 5-word program is NOT what the a618 firmware is waiting for. We have
+now fully characterized the wall:
+  - CTRL_INIT=1 → CTRL_STATUS 0xfe (firmware stable error code, not transient waiting)
+  - Any host ring in that state → CM3_FAULT (firmware hard-faults, not NAK)
+  - PDC enable alone: insufficient
+  - PDC enable + HakiOS 5-word seq: insufficient
+  - HakiOS "hidden_tcs" writes (SM7325 RSCC only): don't apply - no such block on surya
+  - Reads to PDC_SEQ panic the kernel (hypervisor-guarded); writes are safe
+
+### G4d plan (NEXT session): SM7150-SPECIFIC PDC sequence instructions
+We need the EXACT instruction stream for a618/SM7150 that the firmware is waiting for. Candidates:
+  1. mesa freedreno a6xx_gmu.c / a6xx_hw_init.c (open source, best option)
+  2. Surya downstream kernel (Xiaomi publishes these) - kgsl adreno_a6xx_rpmh.c
+  3. Captured values from a running Android on surya (read PDC_SEQ+0x4000 via kgsl debug exports)
+Once we have the right dwords, the write-only path (patch 0122 shape) should drop in cleanly. If the
+firmware then completes init (CTRL_STATUS bit 0 sets), HFI is unlocked and everything after (perf
+tables, GX rail, CP microcode) follows the vendor pattern.
+Also open question: whether we also need to program PDC_CFG hidden-TCS slots at the equivalent offsets
+for SM7150 (HakiOS writes HIDDEN_TCS_CMD0-2 to RSCC on SM7325; surya equivalent lives in PDC_CFG
+somewhere around 0x4000-0x4600 but exact offsets need the vendor source).
 Removed the dangerous read-dump; stage 5 (PDC enable) reverted to exactly the 0120 behavior. NEW stage 6
 (sweetgpu=15): PDC enable + write HakiOS's 5-word program {0xeaaae5a0, 0xe1a1ebab, 0xa2e0a581,
 0xecac82e2, 0x0020edad} to PDC_SEQ+0x4000 (vendor kgsl's SEQ_RAM base) + dsb + CTRL_INIT=1 + send

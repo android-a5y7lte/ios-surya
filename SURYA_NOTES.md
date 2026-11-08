@@ -1372,7 +1372,29 @@ message regardless of CTRL_INIT state - the problem is missing pre-conditions, n
 Sweetgpu=13 was going to be identical; skipped it.
 CONCLUSION: the firmware needs a pre-init step we never did. HakiOS step_gmu_queues reveals what it is.
 
-### G4d-g built (2026-11-08, patch 0120, sweetgpu=14): PDC enable (the missing pre-init)
+### G4d-g result #1 (2026-11-08 17:00, patch 0120, sweetgpu=14): PDC enable took but did NOT help
+PDC readback: before enable=0x00000000, after enable=0x80000001 - our writes landed. BUT:
+CTRL_STATUS still 0xfe after CTRL_INIT=1, CM3_FAULT on GMU_INIT send, no SMMU activity. Identical
+to 0117/0118/0119. So PDC enable alone is not the missing piece.
+INTERPRETATION: AOP did NOT pre-program the PDC sequence RAM (PDC_ENABLE=0 at start strongly suggests
+the GPU PDC was in a pre-init state when our shim took over). OR the sequence IS there but the GMU
+firmware also needs the RSCC seq program analog that we skipped. Next diagnostic: dump the PDC_SEQ
+contents to see which case we are in.
+
+### G4d-g built #2 (2026-11-08, patch 0121, sweetgpu=14): PDC/PDC_SEQ dump diagnostic
+Same PDC enable as 0120, PLUS: map gmu_pdc_seq (0xb490000, 0x10000) and dump the first 0x100 bytes
+in 8-dword rows, plus PDC_CFG at 0x4500/0x4504/0x4520/0x4524, plus PDC_SEQ+0x4000 (where vendor kgsl's
+SEQ_RAM typically lives). This tells us:
+  - All zero: AOP did NOT program PDC_SEQ. Our fix is to port vendor/mesa's SM7150 PDC sequence
+    instructions and write them ourselves. The HakiOS 5-word program (0xeaaae5a0 ...) may or may not
+    apply to SM7150 - it was written for SM7325 and the GMU firmware versions may differ.
+  - Non-zero instructions: AOP DID program it; our problem is elsewhere (maybe a specific register
+    we have not written, or a RSCC-equivalent for SM7150 we have not found).
+aarch64 cross-compile clean, chain bf18b2b -> 5073de5.
+TEST: build sweetgpu=14, boot variant 5 to lock screen, pull ring, grep -aE "G4d-g".
+NEXT (patch 0122) depends on what the dump shows.
+
+### G4d-e-old plan (NEXT): send the first F2H message (GMU_INIT) and complete the handshake
 HakiOS step_gmu_queues (post-babeface, before HFI_CTRL_INIT=1) does on SM7325:
   1. PDC enable at 0xb290000: write PDC_GPU_SEQ_START_ADDR (0x4520) = 0, PDC_GPU_ENABLE (0x4500) = 0x80000001
   2. RSCC seq programming at 0x3de0000 (SEPARATE RSCC BLOCK - SM7325 only, does NOT exist on surya)

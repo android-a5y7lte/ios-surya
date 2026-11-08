@@ -1,0 +1,53 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index bf18b2b..5073de5 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -25,6 +25,7 @@
+  *   sweetgpu>=12 +G4d-f (TEST):     skip CTRL_INIT, send HFI_TEST (id 0x05) - diagnostic (0119).
+  *   sweetgpu>=13 +G4d-f (GMU_INIT): skip CTRL_INIT, send GMU_INIT (id 0x01) - diagnostic (0119).
+  *   sweetgpu>=14 +G4d-g (PDC+CTRL_INIT+GMU_INIT): enable PDC first, then CTRL_INIT=1, then send (0120).
++ *               +PDC/PDC_SEQ dump to see what AOP pre-programmed (patch 0121).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -534,6 +535,8 @@ sweet_gpu_g4d_smmu_probe(void)
+  * enabling the two PDC registers should be enough. */
+ #define GMU_PDC_PA              0x0b290000u
+ #define GMU_PDC_SIZE            0x00010000u
++#define GMU_PDC_SEQ_PA          0x0b490000u      /* surya dt: "kgsl_gmu_pdc_seq" */
++#define GMU_PDC_SEQ_SIZE        0x00010000u
+ #define PDC_GPU_ENABLE          (4u * 0x1140u)   /* 0x4500 */
+ #define PDC_GPU_SEQ_START_ADDR  (4u * 0x1148u)   /* 0x4520 */
+ 
+@@ -845,7 +848,7 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	if (stage >= 5) {
+ 		/* G4d-g: HakiOS step_gmu_queues - enable the GPU's part of the always-on
+ 		 * PDC sequencer so the GMU firmware's HFI init can complete, THEN write
+-		 * HFI_CTRL_INIT=1. This is the sequence the earlier stages were missing. */
++		 * HFI_CTRL_INIT=1. */
+ 		vm_offset_t p = ml_io_map(GMU_PDC_PA, GMU_PDC_SIZE);
+ 		uint32_t en0 = rd(p, PDC_GPU_ENABLE);
+ 		uint32_t sa0 = rd(p, PDC_GPU_SEQ_START_ADDR);
+@@ -855,6 +858,22 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		uint32_t sa1 = rd(p, PDC_GPU_SEQ_START_ADDR);
+ 		printf("SWEET GPU: G4d-g PDC enable: before start_addr=0x%08x enable=0x%08x -> after start_addr=0x%08x enable=0x%08x\n",
+ 		    sa0, en0, sa1, en1);
++
++		/* Diagnostic dump: is the PDC_SEQ RAM pre-programmed by AOP? If yes, non-zero
++		 * instructions will show; if zero, we need to write the sequence ourselves.
++		 * Dump the first 16 dwords of PDC_SEQ at a few candidate base offsets. */
++		vm_offset_t pseq = ml_io_map(GMU_PDC_SEQ_PA, GMU_PDC_SEQ_SIZE);
++		for (uint32_t off = 0; off < 0x100u; off += 32u) {
++			printf("SWEET GPU: G4d-g PDC_SEQ+0x%04x: %08x %08x %08x %08x %08x %08x %08x %08x\n", off,
++			    rd(pseq, off),      rd(pseq, off+4),  rd(pseq, off+8),  rd(pseq, off+12),
++			    rd(pseq, off+16),   rd(pseq, off+20), rd(pseq, off+24), rd(pseq, off+28));
++		}
++		/* Also PDC_CFG around the enable area + known downstream SEQ_RAM offset 0x4000 */
++		printf("SWEET GPU: G4d-g PDC_CFG+0x4500: %08x %08x PDC_CFG+0x4520: %08x %08x\n",
++		    rd(p, 0x4500u), rd(p, 0x4504u), rd(p, 0x4520u), rd(p, 0x4524u));
++		printf("SWEET GPU: G4d-g PDC_SEQ+0x4000 (vendor SEQ_RAM): %08x %08x %08x %08x %08x %08x %08x %08x\n",
++		    rd(pseq, 0x4000u), rd(pseq, 0x4004u), rd(pseq, 0x4008u), rd(pseq, 0x400cu),
++		    rd(pseq, 0x4010u), rd(pseq, 0x4014u), rd(pseq, 0x4018u), rd(pseq, 0x401cu));
+ 	}
+ 	if (stage == 1 || stage == 2 || stage >= 5) {
+ 		printf("SWEET GPU: G4d-d ring HFI_CTRL_INIT=1 and watch the GMU answer\n");

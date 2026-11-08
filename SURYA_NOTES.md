@@ -1836,3 +1836,40 @@ EXPECT also-informative: INTERRUPTED forever (hypervisor swallows but doesn't fo
 clean "does not answer" message.
 EXPECT worst: kernel panic (smc #0 trapped by the hypervisor into a fault path). If this
 happens we learn the hypervisor blocks SMCs outright - still useful info.
+
+### TZ-A result (2026-11-08 21:20, patch 0125, sweettz=1): *** TRUSTZONE ANSWERS *** - MAJOR BREAKTHROUGH
+First time anyone has confirmed the iOS hypervisor on SM7150 passes `smc #0` calls through to
+Qualcomm TrustZone. No kernel panic, no hang, clean round-trip responses from TZ.
+RESULTS:
+  - IS_CALL_AVAILABLE on IS_CALL_AVAILABLE   -> rc=0 answer=0x1 (64-bit FAST+SIP, how=0xc2000000)
+  - IS_CALL_AVAILABLE on PAS_INIT_IMAGE      -> rc=0 answer=0x1
+  - IS_CALL_AVAILABLE on PAS_AUTH_AND_RESET  -> rc=0 answer=0x1
+  - IS_CALL_AVAILABLE on PAS_IS_SUPPORTED   -> rc=0 answer=0x1
+  - PAS_IS_SUPPORTED audio/modem/video/GPU  -> all 0 (expected per HakiOS - this query is unreliable;
+    the real test is calling PAS_INIT_IMAGE with the actual zap shader MDT header)
+Probe ran 4 times (IOService::start is called on multiple matching passes). Each run identical.
+IMPLICATIONS:
+  1. The three TrustZone calls needed to authenticate the GPU zap shader are ALL available on surya.
+  2. SMC+TZ opens a parallel path to the GMU/HFI wall. Zap auth works independently of GMU state;
+     once the 3D core is out of secure mode, HakiOS step 18-21 (SQE microcode, ring, first submit)
+     follow mechanically.
+  3. Validates that HakiOS's full chain (zap shader -> ring -> submit -> hakios-metal) is
+     architecturally viable on SM7150 too.
+
+### TZ-B plan (NEXT): try PAS_INIT_IMAGE with the GPU zap shader MDT
+To get the 3D core out of secure mode we need to:
+  1. PULL the GPU zap shader from surya's Android:
+     - mainline file: a615_zap.mbn (for a618)
+     - OR vendor file: /vendor/firmware/a630_zap.mbn (plus a630_zap.b00..b02 segments)
+     - likely location: /vendor/firmware_mnt/image/a630_zap.mbn (Xiaomi style)
+  2. Parse the .mbn/.mdt ELF: extract the metadata header (the ELF header + hash+cert program segments)
+     into physically-contiguous memory, drop it to DRAM via dc civac + dsb, pass its PA to TrustZone
+     with PAS_INIT_IMAGE(image_id=13, header_addr).
+  3. PAS_INIT_IMAGE answer: 0 = TrustZone accepted the signed header. Then HakiOS step 18-19 load
+     the segments and PAS_AUTH_AND_RESET actually runs the authenticated shader, bringing the 3D
+     core out of secure mode.
+Code reference: HakiOS step_zap_header / step_zap_segments (line ~1600+ of hakios.adreno.c).
+File formats: standard PIL ELF with METADATA program segment holding the hash table and certs;
+parsed by Linux's drivers/soc/qcom/mdt_loader.c; signed by Qualcomm's root cert chain.
+This is a substantial patch (~300 lines: MDT parser + buffer management + PAS_INIT call) but
+it is completely tractable now that SMC is proven open. NO HFI/GMU dependence.

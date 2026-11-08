@@ -1365,7 +1365,34 @@ KEY INSIGHT: HakiOS NEVER writes HFI_CTRL_INIT=1 - their firmware auto-completes
 once pre-conditions (RSCC?) are met. So: (a) CTRL_INIT=1 is probably what pokes the firmware into
 0xfe, and (b) the real blocker is a missing pre-condition the firmware is waiting for.
 
-### G4d-f built (2026-11-08, patch 0119, sweetgpu=12/13): diagnostic - SKIP CTRL_INIT, try different IDs
+### G4d-f result (2026-11-08 16:40, patch 0119, sweetgpu=12): CTRL_STATUS 0 without CTRL_INIT, still CM3_FAULT
+sweetgpu=12 (skip CTRL_INIT + HFI_TEST): hfi_status=0x00000000 (not 0xfe - confirms CTRL_INIT is what
+sets 0xfe), but intr_info=0x00800000 STILL CM3_FAULT on first ring. Firmware crashes on ANY host
+message regardless of CTRL_INIT state - the problem is missing pre-conditions, not CTRL_INIT specifically.
+Sweetgpu=13 was going to be identical; skipped it.
+CONCLUSION: the firmware needs a pre-init step we never did. HakiOS step_gmu_queues reveals what it is.
+
+### G4d-g built (2026-11-08, patch 0120, sweetgpu=14): PDC enable (the missing pre-init)
+HakiOS step_gmu_queues (post-babeface, before HFI_CTRL_INIT=1) does on SM7325:
+  1. PDC enable at 0xb290000: write PDC_GPU_SEQ_START_ADDR (0x4520) = 0, PDC_GPU_ENABLE (0x4500) = 0x80000001
+  2. RSCC seq programming at 0x3de0000 (SEPARATE RSCC BLOCK - SM7325 only, does NOT exist on surya)
+  3. HFI_CTRL_INIT=1 and poll CTRL_STATUS bit 0
+Mainline surya DT (sm7150.dtsi): gmu reg = <0x506a000 0x31000>, <0xb290000 0x10000>, <0xb490000 0x10000>
+reg-names "gmu / gmu_pdc / gmu_pdc_seq". NO separate RSCC - surya is the SM7150 PDC pattern. Working
+hypothesis: AOP (always-on processor) already programmed PDC sequences during Android boot and those
+persist through our fastboot shim; we just need to ENABLE the GPU-side PDC bits.
+Patch: new GMU_PDC_PA 0xb290000 + defines; at sweetgpu>=14 (stage 5), BEFORE CTRL_INIT=1, map PDC and
+write SEQ_START_ADDR=0 then ENABLE=0x80000001 with read-back. Reuses the existing CTRL_INIT and send
+code. aarch64 cross-compile clean, chain 91b3679 -> bf18b2b.
+TEST: build sweetgpu=14, boot variant 5 to lock screen, pull ring, grep -aE "G4d-c|G4d-d|G4d-e|G4d-g".
+EXPECT best: PDC enable prints (shows the before/after), CTRL_STATUS bit 0 sets after CTRL_INIT=1
+(the 0xfe wall falls), GMU_INIT message succeeds, *** HFI HANDSHAKE SUCCEEDED ***. Semantically this
+is the HFI unlock.
+EXPECT also-informative: PDC enable readback shows 0x80000001 took but CTRL_STATUS still 0xfe =>
+AOP did NOT program PDC on this boot or its state is wrong; we would need to port the RSCC seq
+program too (HakiOS 5-word seq). The G4d-g log tells us exactly which case we are in.
+
+### G4d-e-old plan (NEXT): send the first F2H message (GMU_INIT) and complete the handshake
 stage=3 (sweetgpu=12) skips CTRL_INIT and sends HFI_TEST (id=0x05 - vendor's round-trip ping message).
 stage=4 (sweetgpu=13) skips CTRL_INIT and sends GMU_INIT (id=0x01) directly after babeface.
 The G4d-d block now runs only when stage==1 or ==2; stage>=3 falls straight to the message send with

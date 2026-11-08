@@ -1,0 +1,77 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 91b3679..bf18b2b 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -24,7 +24,7 @@
+  *               +pad messages to 4-dword slots with 0xfafafafa, non-zero seq (patch 0118).
+  *   sweetgpu>=12 +G4d-f (TEST):     skip CTRL_INIT, send HFI_TEST (id 0x05) - diagnostic (0119).
+  *   sweetgpu>=13 +G4d-f (GMU_INIT): skip CTRL_INIT, send GMU_INIT (id 0x01) - diagnostic (0119).
+- *   (HakiOS never writes CTRL_INIT; stages 12-13 test if CTRL_INIT is what poisons the firmware.)
++ *   sweetgpu>=14 +G4d-g (PDC+CTRL_INIT+GMU_INIT): enable PDC first, then CTRL_INIT=1, then send (0120).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -524,6 +524,19 @@ sweet_gpu_g4d_smmu_probe(void)
+ 	printf("SWEET GPU: G4d-a done - an enabled CB (M=1) with a non-zero ttbr0 is a live context (the GMU's, if ABL set it up)\n");
+ }
+ 
++/* GMU PDC (Power Domain Controller) - "qcom,gmu kgsl_gmu_pdc_cfg" from the live dt.
++ * The GMU asks RPMh for power/clock changes through a sequencer in the always-on part
++ * of the SoC; the AOP has already programmed its sequence tables, but the GPU's part
++ * must be enabled by us before the GMU firmware's HFI can complete its own init.
++ * Without this, HFI_CTRL_INIT=1 leaves the firmware stuck at CTRL_STATUS=0xfe and any
++ * subsequent host message makes CM3 fault. On HakiOS (SM7325) the equivalent step
++ * is in step_gmu_queues. Surya has no separate RSCC block (SM7150 pattern), so just
++ * enabling the two PDC registers should be enough. */
++#define GMU_PDC_PA              0x0b290000u
++#define GMU_PDC_SIZE            0x00010000u
++#define PDC_GPU_ENABLE          (4u * 0x1140u)   /* 0x4500 */
++#define PDC_GPU_SEQ_START_ADDR  (4u * 0x1148u)   /* 0x4520 */
++
+ /* ---- G4d-b: give the GMU its own SMMU context so it can reach shared memory ------
+  * G4d-a found the GPU SMMU in pure reset - every stream faults, no live context.
+  * HFI (the kernel<->GMU message channel) needs stream 5 (the GMU) to translate
+@@ -829,7 +842,21 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	 * HakiOS never writes CTRL_INIT=1; its firmware auto-completes HFI post-babeface.
+ 	 * Stages 3 and 4 test whether skipping CTRL_INIT lets a message through - if the
+ 	 * CM3_FAULT goes away, CTRL_INIT itself is what crashes the firmware. */
+-	if (stage == 1 || stage == 2) {
++	if (stage >= 5) {
++		/* G4d-g: HakiOS step_gmu_queues - enable the GPU's part of the always-on
++		 * PDC sequencer so the GMU firmware's HFI init can complete, THEN write
++		 * HFI_CTRL_INIT=1. This is the sequence the earlier stages were missing. */
++		vm_offset_t p = ml_io_map(GMU_PDC_PA, GMU_PDC_SIZE);
++		uint32_t en0 = rd(p, PDC_GPU_ENABLE);
++		uint32_t sa0 = rd(p, PDC_GPU_SEQ_START_ADDR);
++		wr(p, PDC_GPU_SEQ_START_ADDR, 0u);
++		wr(p, PDC_GPU_ENABLE, 0x80000001u);
++		uint32_t en1 = rd(p, PDC_GPU_ENABLE);
++		uint32_t sa1 = rd(p, PDC_GPU_SEQ_START_ADDR);
++		printf("SWEET GPU: G4d-g PDC enable: before start_addr=0x%08x enable=0x%08x -> after start_addr=0x%08x enable=0x%08x\n",
++		    sa0, en0, sa1, en1);
++	}
++	if (stage == 1 || stage == 2 || stage >= 5) {
+ 		printf("SWEET GPU: G4d-d ring HFI_CTRL_INIT=1 and watch the GMU answer\n");
+ 		wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
+ 		wr(g, GMU_HFI_CTRL_INIT, 1);
+@@ -865,7 +892,8 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	const char *send_name = (stage == 3) ? "HFI_TEST" : "GMU_INIT";
+ 	const char *stage_label = (stage == 2) ? "G4d-e"
+ 	    : (stage == 3) ? "G4d-f(TEST, no CTRL_INIT)"
+-	    : (stage == 4) ? "G4d-f(GMU_INIT, no CTRL_INIT)" : "G4d-?";
++	    : (stage == 4) ? "G4d-f(GMU_INIT, no CTRL_INIT)"
++	    : (stage == 5) ? "G4d-g(PDC+CTRL_INIT+GMU_INIT)" : "G4d-?";
+ 	printf("SWEET GPU: %s send %s on q0 and poll q1 for the GMU's ack\n", stage_label, send_name);
+ 	uint64_t hfi_phys = kvtophys(hfi_kva);
+ 	vm_offset_t hfi_unc = ml_io_map_wcomb((vm_offset_t)hfi_phys,
+@@ -1005,8 +1033,8 @@ SweetGPU::start(IOService *provider)
+ 		sweet_gpu_g4d_setup();          /* standalone context test */
+ 	}
+ 	if (enabled >= 9) {
+-		int stage = enabled - 9; /* 9->0 G4d-c, 10->1 +G4d-d, 11->2 +G4d-e, 12-13 G4d-f */
+-		if (stage > 4) { stage = 4; }
++		int stage = enabled - 9; /* 9->0 c; 10->1 d; 11->2 e; 12-13 f; 14->5 g (PDC+CTRL_INIT+send) */
++		if (stage > 5) { stage = 5; }
+ 		sweet_gpu_g4d_hfi(stage);
+ 	}
+ 	return true;

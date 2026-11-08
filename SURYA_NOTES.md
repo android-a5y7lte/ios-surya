@@ -1758,3 +1758,58 @@ STAGED PLAN (mirrors GPU G-series; one verifiable step at a time):
 BLOCKED-ON / TO FETCH (no phone needed except where noted): IMX682 (+ other sensors') I2C slave addr and
   sensor-id reg - from a surya vendor image or datasheet; ICP firmware (for C4) - from vendor image.
 Sources: mainline i2c-qcom-cci.c (grok.openbmc.org mirror); surya-dump/live.dts; POCO X3 NFC public camera spec.
+
+### G4d-i result (2026-11-08 18:10, patch 0123, sweetgpu=16): FULL a618 RPMH init at WRONG time - same wall
+Complete port of mainline a6xx_gmu_rpmh_init() using the exact a618 values from the generated
+a6xx*.xml.h (sparse-cloned from torvalds/linux and expanded via its gen_header.py). All RSCC
+writes at GMU+0x23000, PDC_CFG at 0xb290000, PDC_SEQ at 0xb490000+0, TCS1 wakeup bank, TCS3
+sleep bank commands, PDC enable. Everything wrote cleanly (no panic). But firmware still at
+0xfe + CM3_FAULT, identical to every attempt since 0120. Realization: mainline order is
+rpmh_init -> rpmh_start -> fw_start -> hfi_start. Our stage 7 ran rpmh_init AFTER fw_start.
+The firmware decides its RPMH state at boot and does not re-check.
+
+### G4d-j result (2026-11-08 18:30, patch 0124, sweetgpu=17): EARLY init (correct order) - SAME wall
+Factored the RPMH init into a helper and called it EARLY, before the RSCC wake (matching the
+mainline order exactly). All writes still clean. Still rscc_control_ack=0x00000000, CTRL_STATUS
+0xfe, CM3_FAULT on first host ring, q1 empty. No measurable change from 0123.
+
+### HONEST WALL ASSESSMENT (end of 2026-11-08 GPU session)
+We have the exact mainline-aligned code, the exact values, and the exact order for a618. The
+firmware still does not come out of its RPMH-broken state. Ranked suspects for what is really
+blocking us:
+  1. HYPERVISOR FILTERING (most likely). XNU on Qualcomm runs under a hypervisor shim. We already
+     found it strictly guards some MMIO (PDC_SEQ reads panic, SMMU writes need the exact asm str
+     form). Our RSCC writes at GMU+0x23000 may be silently absorbed and never reach the hardware
+     RSCC. We cannot read-back-verify (reads probably trap too). If so this is an architectural
+     blocker needing hypervisor investigation to work around.
+  2. STATE INHERITANCE from Android. Android left the GMU in slumber; RPMH was handed to the
+     always-on sequencer; only the specific wake-back protocol Android's kgsl uses retakes it,
+     and our fastboot-boot inherits a mid-handoff state the normal RSCC_CONTROL_REQ=2 cannot fix.
+  3. GMU FIRMWARE BLOB mismatch. Different a630_gmu.bin variants exist; the one loaded may not
+     match this exact a618 revision on SM7150.
+
+### Next GPU session (longer-horizon, NOT iteration-driven)
+Pick ONE of these and commit to it; each is a real investigation, not a patch cycle:
+  a. MMIO trace comparison: capture RSCC register values from a running Android (via kgsl debugfs
+     or a tiny kernel module) and compare against what we write. If our writes don't persist,
+     hypothesis 1 is confirmed.
+  b. Review iOS XNU PAC/hypervisor sources (if available) for IO permission tables: does
+     gmu+0x23000 have specific restrictions?
+  c. Pull the SPECIFIC GMU firmware variant from a surya Android kernel source tree (not the
+     generic a630_gmu.bin) in case the exact firmware we load matters to this init flow.
+  d. Force a true cold reset of the GMU before our shim takes over (PON via PMIC, or sleep
+     cycle through PDC if we can), then bring it up from power-off.
+  e. Investigate alternative GMU operating modes that may not need full RPMH.
+
+### CONCRETE PROGRESS DELIVERED (2026-11-08)
+  - G4d-b LIVE: GMU SMMU context programmed, M=1, stream 5 mapped, ttbr0 set (patch 0113)
+  - G4d-c LIVE: GMU booted WITH HFI pre-configured, babeface reached (patch 0114)
+  - HFI table laid at iova 0x60006000 with 3 page-aligned queues
+  - Full mainline-aligned a618 RPMH init path PORTED and verified to write without panic
+    at both LATE (patch 0123) and EARLY (patch 0124) timings
+  - Hypervisor behavior characterized: reads to PDC_SEQ panic, writes go through, RSCC writes
+    at GMU+0x23000 go through without panic but have no observable effect
+  - HFI wall precisely characterized: 0xfe stable CTRL_STATUS, CM3_FAULT on any ring,
+    rscc_control_ack=0 persistent across every variation
+The iteration-driven phase of the GMU bring-up is complete. Resuming here next session means
+picking one of the longer-horizon investigations above.

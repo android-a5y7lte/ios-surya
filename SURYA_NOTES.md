@@ -1813,3 +1813,26 @@ Pick ONE of these and commit to it; each is a real investigation, not a patch cy
     rscc_control_ack=0 persistent across every variation
 The iteration-driven phase of the GMU bring-up is complete. Resuming here next session means
 picking one of the longer-horizon investigations above.
+
+### TZ-A (2026-11-08 18:55, patch 0125, boot-arg sweettz=1): TrustZone SMC probe (independent of GPU)
+Independent diagnostic: port of HakiOS scm() + step_trustzone(). Tests whether the iOS hypervisor
+passes `smc #0` calls through to Qualcomm TrustZone on surya. HakiOS proved it works on SM7325
+(and that's how they do the GPU zap shader auth to unlock the 3D core). If it works on SM7150
+too, it opens a whole new attack vector: TrustZone can do things we can't do directly from XNU.
+Calls made (all read-only, no state changes):
+  1. IS_CALL_AVAILABLE on IS_CALL_AVAILABLE (meta ping, 64-bit FAST first, 32-bit retry)
+  2. IS_CALL_AVAILABLE on PAS_INIT_IMAGE / PAS_AUTH_AND_RESET / PAS_IS_SUPPORTED
+  3. PAS_IS_SUPPORTED for audio (PAS 1) / modem (4) / video (9) / GPU zap shader (13),
+     each asked both FAST and preemptible
+New boot-arg: sweettz=1 runs the probe BEFORE any GPU work. Independent of sweetgpu. Safe:
+these are queries that don't change hardware state. Risk: if the hypervisor doesn't handle
+`smc #0` at all, the call might panic the kernel.
+aarch64 cross-compile clean.
+TEST: build sweettz=1 (no sweetgpu needed), boot variant 5 to lock screen, pull ring,
+grep -aE "SWEET TZ" logs/tz.txt.
+EXPECT best: "*** TRUSTZONE ANSWERS SMC CALLS ***" + the PAS_IS_SUPPORTED matrix shows
+which images TrustZone acknowledges. If GPU=yes, zap shader auth path is viable.
+EXPECT also-informative: INTERRUPTED forever (hypervisor swallows but doesn't forward) or a
+clean "does not answer" message.
+EXPECT worst: kernel panic (smc #0 trapped by the hypervisor into a fault path). If this
+happens we learn the hypervisor blocks SMCs outright - still useful info.

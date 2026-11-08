@@ -1,0 +1,140 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 18fda3b..56dbbf5 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -29,6 +29,10 @@
+  *   sweetgpu>=16 +G4d-i: COMPLETE a618 RPMH init - at WRONG time (after fw boot) (patch 0123).
+  *   sweetgpu>=17 +G4d-j: same RPMH init but at CORRECT time (before RSCC wake) (patch 0124).
+  *
++ * Independent boot-arg:
++ *   sweettz=1  probe whether the iOS hypervisor passes `smc #0` calls through to Qualcomm
++ *              TrustZone (patch 0125). Read-only (IS_CALL_AVAILABLE, PAS_IS_SUPPORTED).
++ *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+  * chip GX is owned by the GMU (gpucc-sc7180.c gives gx_gdsc
+@@ -1090,13 +1094,123 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	}
+ }
+ 
++/* ---- Independent TrustZone SMC probe (sweettz=N) ---------------------------------------------
++ * Tests whether the iOS hypervisor passes `smc #0` calls through to the Qualcomm TrustZone
++ * monitor like Android's Linux kernel does. HakiOS proved it works on SM7325; we test SM7150
++ * here. All the calls we make are read-only queries (IS_CALL_AVAILABLE, PAS_IS_SUPPORTED) that
++ * do not change any state, so this is safe to run independently of the GPU bring-up.
++ * Port of HakiOS hakios.adreno.c scm() + step_trustzone(). */
++#define SCM_FAST                (1ull << 31)
++#define SCM_64                  (1ull << 30)
++#define SCM_SIP                 (2ull << 24)
++#define SCM_CALL(service, cmd)  ((uint64_t)(service) << 8 | (cmd))
++#define SCM_IS_CALL_AVAILABLE   SCM_CALL(6u, 1u)
++#define SCM_PAS_INIT_IMAGE      SCM_CALL(2u, 1u)
++#define SCM_PAS_AUTH_AND_RESET  SCM_CALL(2u, 5u)
++#define SCM_PAS_IS_SUPPORTED    SCM_CALL(2u, 7u)
++#define SCM_ONE_VALUE           1u
++#define SCM_INTERRUPTED         1
++#define PAS_GPU                 13u
++#define PAS_AUDIO               1u
++#define PAS_MODEM               4u
++#define PAS_VIDEO               9u
++
++static int32_t
++sweet_scm(const char *what, uint64_t function, uint64_t arguments,
++    uint64_t first, uint64_t second, uint64_t third, uint64_t *answer)
++{
++	uint64_t session = 0;
++	printf("SWEET TZ: %s: smc 0x%llx args 0x%llx 0x%llx 0x%llx\n", what, function, first, second, third);
++	for (int i = 0; i < 100; i++) {
++		register uint64_t x0 __asm__("x0") = (i == 0) ? function : (uint64_t)SCM_INTERRUPTED;
++		register uint64_t x1 __asm__("x1") = arguments;
++		register uint64_t x2 __asm__("x2") = first;
++		register uint64_t x3 __asm__("x3") = second;
++		register uint64_t x4 __asm__("x4") = third;
++		register uint64_t x5 __asm__("x5") = 0;
++		register uint64_t x6 __asm__("x6") = session;
++		register uint64_t x7 __asm__("x7") = 0;
++		__asm__ volatile ("smc #0"
++		    : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3), "+r" (x4), "+r" (x5), "+r" (x6), "+r" (x7)
++		    : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++		session = x6;
++		if (x0 != (uint64_t)SCM_INTERRUPTED) {
++			printf("SWEET TZ:   TrustZone returned %d, answer 0x%llx\n", (int32_t)x0, (unsigned long long)x1);
++			*answer = x1;
++			return (int32_t)x0;
++		}
++	}
++	printf("SWEET TZ:   TrustZone kept saying INTERRUPTED after 100 tries\n");
++	return -1;
++}
++
++static void
++sweet_trustzone_probe(void)
++{
++	static const struct { const char *name; uint32_t id; } images[] = {
++		{ "audio", PAS_AUDIO }, { "modem", PAS_MODEM }, { "video", PAS_VIDEO }, { "GPU zap", PAS_GPU }
++	};
++	uint64_t answer = 0, how = SCM_FAST | SCM_64 | SCM_SIP;
++
++	printf("SWEET TZ: ===== TrustZone SMC probe (surya SM7150) =====\n");
++	printf("SWEET TZ: ask whether 'is this call available' is itself available (64-bit FAST)\n");
++	int32_t rc = sweet_scm("is_call_available meta (64-bit)", how | SCM_IS_CALL_AVAILABLE,
++	    SCM_ONE_VALUE, SCM_SIP | SCM_IS_CALL_AVAILABLE, 0, 0, &answer);
++	if (rc != 0 || answer != 1) {
++		how = SCM_FAST | SCM_SIP;      /* 32-bit retry */
++		printf("SWEET TZ: 64-bit did not answer (rc=%d answer=0x%llx); retrying 32-bit\n", rc, (unsigned long long)answer);
++		rc = sweet_scm("is_call_available meta (32-bit)", how | SCM_IS_CALL_AVAILABLE,
++		    SCM_ONE_VALUE, SCM_SIP | SCM_IS_CALL_AVAILABLE, 0, 0, &answer);
++		if (rc != 0 || answer != 1) {
++			printf("SWEET TZ: !!! TrustZone does not answer SMCs at all through the iOS hypervisor. rc=%d answer=0x%llx\n",
++			    rc, (unsigned long long)answer);
++			return;
++		}
++	}
++	printf("SWEET TZ: *** TRUSTZONE ANSWERS SMC CALLS *** (how=0x%llx). SMC path is open through the hypervisor.\n", how);
++
++	printf("SWEET TZ: ask whether PAS init / auth&reset / is_supported are available\n");
++	sweet_scm("is PAS_INIT_IMAGE available",     how | SCM_IS_CALL_AVAILABLE,
++	    SCM_ONE_VALUE, SCM_SIP | SCM_PAS_INIT_IMAGE, 0, 0, &answer);
++	sweet_scm("is PAS_AUTH_AND_RESET available", how | SCM_IS_CALL_AVAILABLE,
++	    SCM_ONE_VALUE, SCM_SIP | SCM_PAS_AUTH_AND_RESET, 0, 0, &answer);
++	sweet_scm("is PAS_IS_SUPPORTED available",   how | SCM_IS_CALL_AVAILABLE,
++	    SCM_ONE_VALUE, SCM_SIP | SCM_PAS_IS_SUPPORTED, 0, 0, &answer);
++
++	printf("SWEET TZ: ask whether TrustZone supports loading audio, modem, video, GPU zap shader images\n");
++	uint32_t fast_ok[4] = {0}, slow_ok[4] = {0};
++	for (unsigned i = 0; i < 4; i++) {
++		answer = 0;
++		fast_ok[i] = (sweet_scm(images[i].name, how | SCM_PAS_IS_SUPPORTED,
++		    SCM_ONE_VALUE, images[i].id, 0, 0, &answer) == 0 && answer) ? 1 : 0;
++		answer = 0;
++		slow_ok[i] = (sweet_scm(images[i].name, (how & ~SCM_FAST) | SCM_PAS_IS_SUPPORTED,
++		    SCM_ONE_VALUE, images[i].id, 0, 0, &answer) == 0 && answer) ? 1 : 0;
++	}
++	printf("SWEET TZ: supported (fast/preemptible): audio %u/%u, modem %u/%u, video %u/%u, GPU %u/%u\n",
++	    fast_ok[0], slow_ok[0], fast_ok[1], slow_ok[1], fast_ok[2], slow_ok[2], fast_ok[3], slow_ok[3]);
++	if (fast_ok[3] || slow_ok[3]) {
++		printf("SWEET TZ: *** TrustZone LISTS the GPU zap shader - zap auth should work ***\n");
++	} else if (fast_ok[0] || slow_ok[0] || fast_ok[1] || slow_ok[1] || fast_ok[2] || slow_ok[2]) {
++		printf("SWEET TZ: TrustZone lists other images but not the GPU - try actual PAS_INIT_IMAGE anyway later\n");
++	} else {
++		printf("SWEET TZ: TrustZone lists nothing - the IS_SUPPORTED query may not work here; move to PAS_INIT_IMAGE\n");
++	}
++	printf("SWEET TZ: ===== probe done =====\n");
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
++	int sweettz = 0;
++	(void)PE_parse_boot_argn("sweettz", &sweettz, sizeof(sweettz));
++	if (sweettz >= 1) {
++		sweet_trustzone_probe();
++	}
+ 	int enabled = 0;
+ 	(void)PE_parse_boot_argn("sweetgpu", &enabled, sizeof(enabled));
+ 	if (enabled < 1 || !IOService::start(provider)) {
+-		return false;
++		return false; /* SMC output above already went to the log ring via printf */
+ 	}
+ 	printf("SWEET GPU: G1 read-only probe (Adreno 618, chipid 0x06010800)\n");
+ 

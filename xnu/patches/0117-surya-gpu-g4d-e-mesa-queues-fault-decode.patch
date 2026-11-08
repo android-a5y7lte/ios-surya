@@ -1,0 +1,50 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index c8b62db..968ecce 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -20,6 +20,7 @@
+  *               (>=9 runs G4d-c INSTEAD of the minimal G4c boot - HFI must be set pre-boot.)
+  *   sweetgpu>=10 +G4d-d: ring HFI_CTRL_INIT and watch the GMU bring HFI up (patch 0115).
+  *   sweetgpu>=11 +G4d-e: send GMU_INIT on q0, poll q1 for the first ack (patch 0116).
++ *               +page-aligned queue layout + CM3_FAULT / SMMU FSR decode (patch 0117).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -597,7 +598,12 @@ struct hfi_table {
+ 	uint32_t version, words, first_queue, queue_words, queues, active_queues;
+ 	struct hfi_queue queue[17];
+ };
+-#define HFI_QUEUE_AT(n)     ((((uint32_t)sizeof(struct hfi_table) + 15u) / 16u * 16u) + 4096u * (n))
++/* Place each queue at the start of its own page (mesa/vendor layout) rather than
++ * packing them right after the hfi_table (the HakiOS compact layout). G4d-e saw
++ * CM3_FAULT bit 23 set when the GMU tried to process the first message with the
++ * compact layout - a618's older firmware very likely insists on page-aligned
++ * queues. Queue n lives on buffer page (GMU_HFI_PAGE0 + 1 + n). */
++#define HFI_QUEUE_AT(n)     (4096u * (1u + (n)))
+ 
+ /* push CPU writes out to DRAM: the SMMU walks tables and the GMU reads buffers from
+  * memory, not this core's cache. */
+@@ -896,7 +902,22 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		printf("SWEET GPU: G4d-e *** HFI HANDSHAKE SUCCEEDED *** (status 0x%08x, q1_write=%u). The kernel is talking to the GMU. Next: perf/bw tables, then GX rail up.\n",
+ 		    s3, q1_w);
+ 	} else {
+-		printf("SWEET GPU: G4d-e GMU did not answer within ~100 ms. CTRL_STATUS 0x%08x unchanged. Next test: mesa-style page-aligned queue layout (q0@+0x1000, q1@+0x2000, q2@+0x3000), or different GMU_INIT payload size.\n", s3);
++		printf("SWEET GPU: G4d-e GMU did not answer within ~100 ms. CTRL_STATUS 0x%08x unchanged.\n", s3);
++	}
++	/* Decode CM3_FAULT (bit 23) and SMMU fault register regardless of outcome, so
++	 * a fault during the handshake is not silently obscured by a "success" marker. */
++	if (intr_info & 0x00800000u) {
++		printf("SWEET GPU: G4d-e !!! GMU firmware FAULTED (CM3_FAULT bit 23) processing our message - it ran our handler and crashed\n");
++	}
++	{
++		vm_offset_t ss = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
++		uint32_t id1b = smmu_rd(ss, SMMU_ID1);
++		uint32_t numpg = 1u << (((id1b >> 28) & 7u) + 1u);
++		uint32_t pgshb = (id1b & (1u << 31)) ? 16u : 12u;
++		vm_offset_t cb1 = ss + (numpg << pgshb) + (vm_offset_t)GMU_CTX * (1u << pgshb);
++		uint32_t fsr2 = smmu_rd(cb1, SMMU_CB_FSR);
++		printf("SWEET GPU: G4d-e context post-ring: fsr=0x%08x far=0x%08x%08x fsynr0=0x%08x (nonzero fault bits => SMMU translation fault during HFI processing)\n",
++		    fsr2, smmu_rd(cb1, SMMU_CB_FAR_HI), smmu_rd(cb1, SMMU_CB_FAR_LO), smmu_rd(cb1, SMMU_CB_FSYNR0));
+ 	}
+ }
+ 

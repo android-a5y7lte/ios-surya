@@ -1330,7 +1330,35 @@ first message". Two weaker hypotheses: queue layout off (mesa uses page-aligned 
 firmware init. Strongest next test: send the GMU_INIT message (which falsifies hyp.1 immediately if it
 succeeds).
 
-### G4d-e built (2026-11-07 00:20, patch 0116, sweetgpu=11): send GMU_INIT, poll q1 for the ack
+### G4d-e result #1 (2026-11-07 00:35, patch 0116, sweetgpu=11): GMU firmware CM3_FAULT
+intr_info=0x00800000 = **bit 23 = CM3_FAULT** (A6XX_GMU_GMU2HOST_INTR_INFO_CM3_FAULT). The GMU firmware
+RECEIVED our ring and ran our-way through its HFI handler, then took a Cortex-M3 exception. CTRL_STATUS
+0xfe unchanged, q1_write=0, q1_read=0, hfi_version=0. The packet we wrote was well-formed (hdr=0x00000501
+id 0x01, size 5, type CMD, payload all zero = cold boot). So the firmware is crashing on OUR table or
+queue layout, not on silence.
+Three hypotheses (ranked):
+ 1. Queue layout - we used HakiOS "compact" (q0 at HFI+0x350 etc). Mesa/vendor kgsl use PAGE-ALIGNED
+    (q0 at HFI+0x1000, q1 at +0x2000, q2 at +0x3000). a618 is a6xx-gen1 (older than HakiOS's a660), may
+    insist on page alignment. ONE-DEFINE CHANGE - try first.
+ 2. RSCC vote incomplete - G4c saw rscc_control_ack=0 (should be 2). GMU booted anyway but HFI init may
+    need to vote and fault on failure. Bigger patch (need to map surya RSCC + vote-sequence setup).
+ 3. Missing power config (PWR_COL_INTER_FRAME_HYST, SPTPRAC_HYST) mesa writes before HFI start. Less
+    likely to fault specifically.
+### G4d-e built #2 (2026-11-08, patch 0117, sweetgpu=11): mesa page-aligned queues + CM3/FSR decode
+HFI_QUEUE_AT(n) = 4096*(1+n) instead of 848+4096*n => queues at HFI+0x1000/0x2000/0x3000, each own page.
+G4d-e tail now ALSO: (a) prints "CM3_FAULT - GMU ran our handler and crashed" when intr_info bit 23 set;
+(b) re-reads SMMU context-bank FSR/FAR/FSYNR0 after the fault to distinguish firmware-internal fault
+(FSR unchanged) from SMMU translation fault (FSR nonzero). Buffer still 4 HFI pages = 16K (q2 ends at
+0x4000 so fits). Note GMU_HFI_PAGE0 kept at 6; iova 0x60006000 is the table, 0x60007/8/9000 are q0/1/2.
+aarch64 cross-compile clean, blob chain c8b62db -> 968ecce applies in sequence.
+TEST: build sweetgpu=11, boot variant 5 to lock screen, pull ring, grep -aE "G4d-c|G4d-d|G4d-e".
+EXPECT decision tree:
+  - *** HFI HANDSHAKE SUCCEEDED ***: layout WAS the issue, we are over the wall. Next: perf/bw tables.
+  - CM3_FAULT again, FSR=0: firmware crashes regardless of queue layout; investigate RSCC (hyp.2).
+  - CM3_FAULT, FSR non-zero: SMMU translation fault while GMU DMAs the table; FAR tells us which iova.
+  - No fault, CTRL_STATUS still 0xfe: firmware silently rejected - queue addr or size problem.
+
+### G4d-e-old plan (NEXT): send the first F2H message (GMU_INIT) and complete the handshake
 sweet_gpu_g4d_hfi() now takes int stage (0=G4d-c, 1=+G4d-d, 2=+G4d-e); dispatch maps sweetgpu-9 clamped to
 [0,2]. G4d-e tail: ml_io_map_wcomb() over the HFI buffer phys range for uncached CPU<->GMU shared memory
 (so our writes land in DRAM at once, and reads see what the GMU wrote with no manual cache ops); read

@@ -1354,7 +1354,34 @@ BOUNDARIES with 0xfafafafa fillers, and queue->write must advance by the padded 
 dwords for GMU_INIT and advanced write by 5. Firmware parses the queue in 16-byte slots: dword 5 is
 read as the next message header, dword 5 is 0 (buffer zeroed) => id=0 size=0 => CM3 jumps/faults.
 Matches the symptom exactly (CM3_FAULT, no SMMU activity).
-### G4d-e built #3 (2026-11-08, patch 0118, sweetgpu=11): pad to 4-dword slot + non-zero seq
+### G4d-e result #3 (2026-11-08 16:00, patch 0118, sweetgpu=11): padding did not help - IDENTICAL fault
+Padded message to 8 dwords (5 real + 3 0xfafafafa), advanced write by 8, hdr seq=1 (hdr=0x00100501).
+Firmware STILL faulted identically: CM3_FAULT bit 23, CTRL_STATUS 0xfe stuck, no SMMU activity, q1
+empty. So HFI message format is not what crashes the firmware - the fault is upstream of our content.
+PATTERN OBSERVED across 0116/0117/0118: CTRL_STATUS=0xfe is a STABLE firmware error code set during
+CTRL_INIT=1 processing, NOT a "waiting for message" state. Firmware does not recover from it. Our ring
+on top of this half-initialized state is what triggers the CM3 exception.
+KEY INSIGHT: HakiOS NEVER writes HFI_CTRL_INIT=1 - their firmware auto-completes HFI post-babeface
+once pre-conditions (RSCC?) are met. So: (a) CTRL_INIT=1 is probably what pokes the firmware into
+0xfe, and (b) the real blocker is a missing pre-condition the firmware is waiting for.
+
+### G4d-f built (2026-11-08, patch 0119, sweetgpu=12/13): diagnostic - SKIP CTRL_INIT, try different IDs
+stage=3 (sweetgpu=12) skips CTRL_INIT and sends HFI_TEST (id=0x05 - vendor's round-trip ping message).
+stage=4 (sweetgpu=13) skips CTRL_INIT and sends GMU_INIT (id=0x01) directly after babeface.
+The G4d-d block now runs only when stage==1 or ==2; stage>=3 falls straight to the message send with
+the chosen id. All logs use a stage_label so you can tell which test produced each line. aarch64
+cross-compile clean, chain 08bdc62 -> 91b3679.
+TEST: build sweetgpu=12 first, then sweetgpu=13, pull ring each time, grep -aE "G4d-c|G4d-d|G4d-f".
+EXPECT if either works: no CM3_FAULT and either q1_write != 0 (we got an ack) or ctrl_status bit 0 set.
+That would mean: skip CTRL_INIT, go straight to messages, like HakiOS. Path unlocked.
+EXPECT if both fault same way: RSCC is the real blocker. Commit to the big RSCC patch (0120+).
+
+### G4d-g plan if 0119 doesn't help: RSCC proper setup
+Study the surya DT for the RSCC block (likely @ 0x18200000 or similar for sm7150), map it, port the
+HakiOS RSCC command-table + DRV setup, do the full vote sequence, THEN run through G4c -> HFI. Multiple
+iterations likely. This is the honest fix if 0119 falsifies the "CTRL_INIT is poisoning" angle.
+
+### G4d-e-old plan (NEXT): send the first F2H message (GMU_INIT) and complete the handshake
 Pad GMU_INIT from 5 to 8 dwords (w0+5..w0+7 = 0xfafafafa), advance queue[0].write by 8 not 5. Also set
 sequence=1 in header bits 20-31 (HakiOS starts at 1; firmware MAY care). hdr becomes 0x00100501 instead
 of 0x00000501. One-paragraph change (~15 lines). aarch64 cross-compile clean, chain 968ecce -> 08bdc62.

@@ -1,0 +1,177 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 08bdc62..91b3679 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -22,6 +22,9 @@
+  *   sweetgpu>=11 +G4d-e: send GMU_INIT on q0, poll q1 for the first ack (patch 0116).
+  *               +page-aligned queue layout + CM3_FAULT / SMMU FSR decode (patch 0117).
+  *               +pad messages to 4-dword slots with 0xfafafafa, non-zero seq (patch 0118).
++ *   sweetgpu>=12 +G4d-f (TEST):     skip CTRL_INIT, send HFI_TEST (id 0x05) - diagnostic (0119).
++ *   sweetgpu>=13 +G4d-f (GMU_INIT): skip CTRL_INIT, send GMU_INIT (id 0x01) - diagnostic (0119).
++ *   (HakiOS never writes CTRL_INIT; stages 12-13 test if CTRL_INIT is what poisons the firmware.)
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -817,27 +820,35 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	 * GMU2HOST_INTR_INFO too. Vendor a6xx_hfi.c calls this "hfi start"; HakiOS reaches
+ 	 * the same state through a brief waitlet after step_gmu_start. Clear the host-side
+ 	 * interrupt latch first so a fresh event shows plainly. */
+-	if (stage < 1) {
+-		return;
+-	}
+-	printf("SWEET GPU: G4d-d ring HFI_CTRL_INIT=1 and watch the GMU answer\n");
+-	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
+-	wr(g, GMU_HFI_CTRL_INIT, 1);
+-	uint32_t s2 = 0;
+-	for (int i = 0; i < 1000; i++) {
+-		s2 = rd(g, GMU_HFI_CTRL_STATUS);
+-		if (s2 & 1u) { break; }
+-		IODelay(100);
+-	}
+-	uint32_t v2   = rd(g, GMU_HFI_VERSION_INFO);
+-	uint32_t in2  = rd(g, GMU_GMU2HOST_INTR_INFO);
+-	uint32_t fw2  = rd(g, GMU_CM3_FW_INIT_RESULT);
+-	printf("SWEET GPU: G4d-d hfi_ctrl_status=0x%08x hfi_version=0x%08x gmu2host_intr=0x%08x fw=0x%08x\n",
+-	    s2, v2, in2, fw2);
+-	if (s2 & 1u) {
+-		printf("SWEET GPU: G4d-d *** HFI IS ALIVE *** (version 0x%08x, intr 0x%08x).\n", v2, in2);
+-	} else {
+-		printf("SWEET GPU: G4d-d HFI not alive yet (status 0x%08x). Vendor flow sends GMU_INIT next; that is G4d-e.\n", s2);
++	/* stage encoding:
++	 *   0 (sweetgpu=9):  boot only (G4d-c).
++	 *   1 (sweetgpu=10): +CTRL_INIT=1 (G4d-d).
++	 *   2 (sweetgpu=11): +CTRL_INIT + send GMU_INIT (G4d-e).
++	 *   3 (sweetgpu=12): SKIP CTRL_INIT, send HFI_TEST (0x05) - diagnostic (G4d-f).
++	 *   4 (sweetgpu=13): SKIP CTRL_INIT, send GMU_INIT (0x01) directly - diagnostic.
++	 * HakiOS never writes CTRL_INIT=1; its firmware auto-completes HFI post-babeface.
++	 * Stages 3 and 4 test whether skipping CTRL_INIT lets a message through - if the
++	 * CM3_FAULT goes away, CTRL_INIT itself is what crashes the firmware. */
++	if (stage == 1 || stage == 2) {
++		printf("SWEET GPU: G4d-d ring HFI_CTRL_INIT=1 and watch the GMU answer\n");
++		wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
++		wr(g, GMU_HFI_CTRL_INIT, 1);
++		uint32_t s2 = 0;
++		for (int i = 0; i < 1000; i++) {
++			s2 = rd(g, GMU_HFI_CTRL_STATUS);
++			if (s2 & 1u) { break; }
++			IODelay(100);
++		}
++		uint32_t v2   = rd(g, GMU_HFI_VERSION_INFO);
++		uint32_t in2  = rd(g, GMU_GMU2HOST_INTR_INFO);
++		uint32_t fw2  = rd(g, GMU_CM3_FW_INIT_RESULT);
++		printf("SWEET GPU: G4d-d hfi_ctrl_status=0x%08x hfi_version=0x%08x gmu2host_intr=0x%08x fw=0x%08x\n",
++		    s2, v2, in2, fw2);
++		if (s2 & 1u) {
++			printf("SWEET GPU: G4d-d *** HFI IS ALIVE *** (version 0x%08x, intr 0x%08x).\n", v2, in2);
++		} else {
++			printf("SWEET GPU: G4d-d HFI not alive yet (status 0x%08x). Vendor flow sends GMU_INIT next; that is G4d-e.\n", s2);
++		}
+ 	}
+ 
+ 	/* G4d-e: send the first H2F message - GMU_INIT - on queue 0 and watch for the GMU's
+@@ -850,12 +861,17 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	if (stage < 2) {
+ 		return;
+ 	}
+-	printf("SWEET GPU: G4d-e send GMU_INIT on q0 and poll q1 for the GMU's ack\n");
++	uint32_t send_id = (stage == 3) ? 0x05u : 0x01u;
++	const char *send_name = (stage == 3) ? "HFI_TEST" : "GMU_INIT";
++	const char *stage_label = (stage == 2) ? "G4d-e"
++	    : (stage == 3) ? "G4d-f(TEST, no CTRL_INIT)"
++	    : (stage == 4) ? "G4d-f(GMU_INIT, no CTRL_INIT)" : "G4d-?";
++	printf("SWEET GPU: %s send %s on q0 and poll q1 for the GMU's ack\n", stage_label, send_name);
+ 	uint64_t hfi_phys = kvtophys(hfi_kva);
+ 	vm_offset_t hfi_unc = ml_io_map_wcomb((vm_offset_t)hfi_phys,
+ 	    (vm_size_t)(GMU_MAP_PAGES - GMU_HFI_PAGE0) * SMMU_GRANULE);
+ 	if (hfi_unc == 0) {
+-		printf("SWEET GPU: G4d-e ml_io_map_wcomb failed - abort\n");
++		printf("SWEET GPU: %s ml_io_map_wcomb failed - abort\n", stage_label);
+ 		return;
+ 	}
+ 	volatile struct hfi_table *hfi_u = (volatile struct hfi_table *)hfi_unc;
+@@ -869,19 +885,19 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	 * sequence number (HakiOS starts at 1): bits 20-31 of the header. */
+ 	uint32_t w0 = hfi_u->queue[0].write;
+ 	uint32_t seq = 1u;
+-	uint32_t hdr = 0x01u | (5u << 8) | (0u << 16) | (seq << 20); /* id=INIT|size=5|type=CMD|seq=1 */
++	uint32_t hdr = send_id | (5u << 8) | (0u << 16) | (seq << 20); /* id|size=5|type=CMD|seq=1 */
+ 	q0_data[w0 + 0u] = hdr;
+-	q0_data[w0 + 1u] = 0u;             /* seg_id */
+-	q0_data[w0 + 2u] = 0u;             /* dbg_buf_addr */
+-	q0_data[w0 + 3u] = 0u;             /* dbg_buf_size */
+-	q0_data[w0 + 4u] = 0u;             /* boot_state = cold */
+-	q0_data[w0 + 5u] = 0xfafafafau;    /* pad to 4-dword slot boundary (vendor expects it) */
++	q0_data[w0 + 1u] = 0u;             /* seg_id / arg0 */
++	q0_data[w0 + 2u] = 0u;             /* dbg_buf_addr / arg1 */
++	q0_data[w0 + 3u] = 0u;             /* dbg_buf_size / arg2 */
++	q0_data[w0 + 4u] = 0u;             /* boot_state=cold / arg3 */
++	q0_data[w0 + 5u] = 0xfafafafau;    /* pad to 4-dword slot boundary (HakiOS/vendor) */
+ 	q0_data[w0 + 6u] = 0xfafafafau;
+ 	q0_data[w0 + 7u] = 0xfafafafau;
+-	hfi_u->queue[0].write = w0 + 8u;   /* advance by PADDED length, not message length */
++	hfi_u->queue[0].write = w0 + 8u;   /* advance by PADDED length */
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+-	printf("SWEET GPU: G4d-e wrote GMU_INIT hdr=0x%08x at q0[w=%u], new write=%u (padded 5->8 dwords)\n",
+-	    hdr, w0, w0 + 8u);
++	printf("SWEET GPU: %s wrote %s hdr=0x%08x at q0[w=%u], new write=%u (padded 5->8 dwords)\n",
++	    stage_label, send_name, hdr, w0, w0 + 8u);
+ 
+ 	/* ring the GMU: bit 0 of HOST2GMU_INTR_SET = "message waiting for you" */
+ 	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);  /* clear any stale latch */
+@@ -899,26 +915,26 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	uint32_t s3  = rd(g, GMU_HFI_CTRL_STATUS);
+ 	uint32_t v3  = rd(g, GMU_HFI_VERSION_INFO);
+ 	uint32_t q1_r = hfi_u->queue[1].read;
+-	printf("SWEET GPU: G4d-e intr_info=0x%08x hfi_status=0x%08x hfi_version=0x%08x q1[r=%u w=%u]\n",
+-	    intr_info, s3, v3, q1_r, q1_w);
++	printf("SWEET GPU: %s intr_info=0x%08x hfi_status=0x%08x hfi_version=0x%08x q1[r=%u w=%u]\n",
++	    stage_label, intr_info, s3, v3, q1_r, q1_w);
+ 	if (q1_w != 0u) {
+ 		uint32_t ack_hdr  = q1_data[0];
+ 		uint32_t ack_id   = ack_hdr & 0xffu;
+ 		uint32_t ack_size = (ack_hdr >> 8) & 0xffu;
+ 		uint32_t ack_type = (ack_hdr >> 16) & 0xfu;
+-		printf("SWEET GPU: G4d-e q1 ack hdr=0x%08x (id=0x%02x size=%u type=%u) dw1=0x%08x dw2=0x%08x dw3=0x%08x\n",
+-		    ack_hdr, ack_id, ack_size, ack_type, q1_data[1], q1_data[2], q1_data[3]);
++		printf("SWEET GPU: %s q1 ack hdr=0x%08x (id=0x%02x size=%u type=%u) dw1=0x%08x dw2=0x%08x dw3=0x%08x\n",
++		    stage_label, ack_hdr, ack_id, ack_size, ack_type, q1_data[1], q1_data[2], q1_data[3]);
+ 	}
+ 	if ((s3 & 1u) != 0u || q1_w != 0u) {
+-		printf("SWEET GPU: G4d-e *** HFI HANDSHAKE SUCCEEDED *** (status 0x%08x, q1_write=%u). The kernel is talking to the GMU. Next: perf/bw tables, then GX rail up.\n",
+-		    s3, q1_w);
++		printf("SWEET GPU: %s *** HFI HANDSHAKE SUCCEEDED *** (status 0x%08x, q1_write=%u). The kernel is talking to the GMU. Next: perf/bw tables, then GX rail up.\n",
++		    stage_label, s3, q1_w);
+ 	} else {
+-		printf("SWEET GPU: G4d-e GMU did not answer within ~100 ms. CTRL_STATUS 0x%08x unchanged.\n", s3);
++		printf("SWEET GPU: %s GMU did not answer within ~100 ms. CTRL_STATUS 0x%08x unchanged.\n", stage_label, s3);
+ 	}
+ 	/* Decode CM3_FAULT (bit 23) and SMMU fault register regardless of outcome, so
+ 	 * a fault during the handshake is not silently obscured by a "success" marker. */
+ 	if (intr_info & 0x00800000u) {
+-		printf("SWEET GPU: G4d-e !!! GMU firmware FAULTED (CM3_FAULT bit 23) processing our message - it ran our handler and crashed\n");
++		printf("SWEET GPU: %s !!! GMU firmware FAULTED (CM3_FAULT bit 23) processing our message - it ran our handler and crashed\n", stage_label);
+ 	}
+ 	{
+ 		vm_offset_t ss = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
+@@ -927,8 +943,8 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		uint32_t pgshb = (id1b & (1u << 31)) ? 16u : 12u;
+ 		vm_offset_t cb1 = ss + (numpg << pgshb) + (vm_offset_t)GMU_CTX * (1u << pgshb);
+ 		uint32_t fsr2 = smmu_rd(cb1, SMMU_CB_FSR);
+-		printf("SWEET GPU: G4d-e context post-ring: fsr=0x%08x far=0x%08x%08x fsynr0=0x%08x (nonzero fault bits => SMMU translation fault during HFI processing)\n",
+-		    fsr2, smmu_rd(cb1, SMMU_CB_FAR_HI), smmu_rd(cb1, SMMU_CB_FAR_LO), smmu_rd(cb1, SMMU_CB_FSYNR0));
++		printf("SWEET GPU: %s context post-ring: fsr=0x%08x far=0x%08x%08x fsynr0=0x%08x (nonzero fault bits => SMMU translation fault during HFI processing)\n",
++		    stage_label, fsr2, smmu_rd(cb1, SMMU_CB_FAR_HI), smmu_rd(cb1, SMMU_CB_FAR_LO), smmu_rd(cb1, SMMU_CB_FSYNR0));
+ 	}
+ }
+ 
+@@ -989,8 +1005,8 @@ SweetGPU::start(IOService *provider)
+ 		sweet_gpu_g4d_setup();          /* standalone context test */
+ 	}
+ 	if (enabled >= 9) {
+-		int stage = enabled - 9; /* 9->0 G4d-c, 10->1 +G4d-d, 11->2 +G4d-e */
+-		if (stage > 2) { stage = 2; }
++		int stage = enabled - 9; /* 9->0 G4d-c, 10->1 +G4d-d, 11->2 +G4d-e, 12-13 G4d-f */
++		if (stage > 4) { stage = 4; }
+ 		sweet_gpu_g4d_hfi(stage);
+ 	}
+ 	return true;

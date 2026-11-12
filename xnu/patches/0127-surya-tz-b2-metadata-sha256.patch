@@ -16,9 +16,9 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
  #include <pexpert/pexpert.h>
  #include <pexpert/device_tree.h>
 +#include <libkern/crypto/sha2.h>
+ #include <mach/vm_param.h>
+ #include <vm/vm_kern.h>
  
- extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
- extern "C" vm_offset_t ml_static_ptovirt(vm_offset_t paddr);
 @@ -1250,6 +1254,103 @@ sweet_tz_b1_check_zap_fw(void)
  	return true;
  }

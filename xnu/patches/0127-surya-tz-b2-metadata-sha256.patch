@@ -11,7 +11,7 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
   *
   * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
   * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
-@@ -31,6 +31,7 @@
+@@ -51,6 +54,7 @@
  #include <IOKit/IOLib.h>
  #include <pexpert/pexpert.h>
  #include <pexpert/device_tree.h>
@@ -19,7 +19,7 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
  
  extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
  extern "C" vm_offset_t ml_static_ptovirt(vm_offset_t paddr);
-@@ -1260,6 +1261,103 @@ sweet_tz_b1_check_zap_fw(void)
+@@ -1250,6 +1254,103 @@ sweet_tz_b1_check_zap_fw(void)
  	return true;
  }
  
@@ -123,7 +123,7 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
  bool
  SweetGPU::start(IOService *provider)
  {
-@@ -1269,6 +1367,9 @@ SweetGPU::start(IOService *provider)
+@@ -1261,6 +1362,9 @@ SweetGPU::start(IOService *provider)
  	if (sweettz >= 2) {
  		sweet_tz_b1_check_zap_fw();
  	}

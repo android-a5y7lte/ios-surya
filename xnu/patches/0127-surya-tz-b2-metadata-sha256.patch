@@ -1,0 +1,135 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -35,6 +35,9 @@
+  *   sweettz>=2 +TZ-B.1: read the "ZapFW" blob the shim injected via /chosen/memory-map
+  *              (tools/surya-test4.sh --blob ZapFW=research/fw/a630_zap.mbn), print its
+  *              length, byte-sum, and head/tail bytes to prove it survived (patch 0126).
++ *   sweettz>=3 +TZ-B.2: build the metadata blob (ELF header + HASH segment, per mainline
++ *              qcom_mdt_read_metadata) and sha256-check it against the known-good
++ *              89787cb2516348872f2653036260f3fb0ccc87d9c7e52d28e536c688a7d9027c (patch 0127).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -31,6 +31,7 @@
+ #include <IOKit/IOLib.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
++#include <libkern/crypto/sha2.h>
+ 
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern "C" vm_offset_t ml_static_ptovirt(vm_offset_t paddr);
+@@ -1260,6 +1261,103 @@ sweet_tz_b1_check_zap_fw(void)
+ 	return true;
+ }
+ 
++/* ---- TZ-B.2: build zap shader metadata blob + sha256-check (sweettz>=3) --------------------
++ * Qualcomm zap shaders are signed as ELF32 QUALCOMM DSP6 images. The firmware blob loader in
++ * mainline Linux (drivers/soc/qcom/mdt_loader.c, qcom_mdt_read_metadata) passes the first
++ * phdrs[0].p_filesz bytes (ELF header + program-header table) concatenated with the HASH
++ * segment's contents (QCOM_MDT_TYPE_HASH = 2 in bits 24-26 of p_flags) to the TrustZone
++ * PAS_INIT_IMAGE SMC. For our a630_zap.mbn that is 0x94 + 0x1988 = 0x1a1c bytes, and the
++ * sha256 of the result is 89787cb2516348872f2653036260f3fb0ccc87d9c7e52d28e536c688a7d9027c
++ * (verified on host). Here we build the same blob into a page-aligned buffer, print its
++ * sha256, and compare to the known-good value. No SMCs issued yet - that is TZ-B.3. */
++#define SURYA_ZAP_META_CAPACITY         0x2000u
++static __attribute__((aligned(0x1000))) uint8_t surya_zap_metadata[SURYA_ZAP_META_CAPACITY];
++static uint32_t                                 surya_zap_metadata_len;
++
++static bool
++sweet_tz_b2_build_metadata(void)
++{
++	/* Re-fetch the ZapFW blob via the same DT path B.1 validated. */
++	DTEntry mm;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &mm) != kSuccess ||
++	    SecureDTGetProperty(mm, "ZapFW", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		printf("SWEET TZ: B.2 no ZapFW blob (did B.1 run?)\n");
++		return false;
++	}
++	uint64_t fw_pa = reg[0], fw_size = reg[1];
++	const uint8_t *fw = (const uint8_t *)ml_static_ptovirt((vm_offset_t)fw_pa);
++	if (fw == NULL || fw_size < 0x100ull) {
++		printf("SWEET TZ: B.2 bad fw map (va=%p size=0x%llx)\n", fw, (unsigned long long)fw_size);
++		return false;
++	}
++	/* ELF32 header layout: e_phoff at 0x1c (we expect 0x34), e_phnum at 0x2c, phdr size 32. */
++	uint32_t ehdr_phoff; memcpy(&ehdr_phoff, fw + 0x1c, 4);
++	uint16_t e_phnum;    memcpy(&e_phnum,    fw + 0x2c, 2);
++	if (ehdr_phoff != 0x34 || e_phnum == 0 || e_phnum > 8) {
++		printf("SWEET TZ: B.2 unexpected ELF (phoff=0x%x phnum=%u)\n", ehdr_phoff, e_phnum);
++		return false;
++	}
++	/* ehdr_size (metadata part 1) = phdrs[0].p_filesz (field at phdr off 0x10). */
++	uint32_t ehdr_size; memcpy(&ehdr_size, fw + 0x34 + 16, 4);
++	if (ehdr_size == 0 || ehdr_size > 0x1000u || (uint64_t)ehdr_size > fw_size) {
++		printf("SWEET TZ: B.2 bad ehdr_size 0x%x\n", ehdr_size);
++		return false;
++	}
++	/* Find the HASH segment (QCOM_MDT_TYPE_MASK=7<<24, QCOM_MDT_TYPE_HASH=2<<24). */
++	int hash_idx = -1;
++	for (uint16_t i = 0; i < e_phnum; i++) {
++		uint32_t flags; memcpy(&flags, fw + 0x34 + 32u * i + 24, 4);
++		if ((flags & (7u << 24)) == (2u << 24)) { hash_idx = (int)i; break; }
++	}
++	if (hash_idx < 0) {
++		printf("SWEET TZ: B.2 no HASH segment in zap shader\n");
++		return false;
++	}
++	uint32_t h_off; memcpy(&h_off, fw + 0x34 + 32u * hash_idx + 4,  4);
++	uint32_t h_sz;  memcpy(&h_sz,  fw + 0x34 + 32u * hash_idx + 16, 4);
++	if (h_off == 0 || h_sz == 0 || (uint64_t)h_off + h_sz > fw_size) {
++		printf("SWEET TZ: B.2 bad HASH segment (off=0x%x sz=0x%x)\n", h_off, h_sz);
++		return false;
++	}
++	uint32_t total = ehdr_size + h_sz;
++	if (total > SURYA_ZAP_META_CAPACITY) {
++		printf("SWEET TZ: B.2 metadata too large (0x%x > 0x%x)\n", total, SURYA_ZAP_META_CAPACITY);
++		return false;
++	}
++	memcpy(surya_zap_metadata, fw, ehdr_size);
++	memcpy(surya_zap_metadata + ehdr_size, fw + h_off, h_sz);
++	surya_zap_metadata_len = total;
++	/* sha256 the merged blob with the libkern/corecrypto SHA256 (patch 0023). */
++	SHA256_CTX sctx;
++	uint8_t digest[32];
++	SHA256_Init(&sctx);
++	SHA256_Update(&sctx, surya_zap_metadata, total);
++	SHA256_Final(digest, &sctx);
++	printf("SWEET TZ: B.2 metadata ehdr_sz=0x%x hash_idx=%d h_off=0x%x h_sz=0x%x total=0x%x\n",
++	    ehdr_size, hash_idx, h_off, h_sz, total);
++	printf("SWEET TZ: B.2 buf va=%p len=%u\n", (void *)surya_zap_metadata, total);
++	printf("SWEET TZ: B.2 sha256 "
++	    "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x"
++	    "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
++	    digest[0],  digest[1],  digest[2],  digest[3],  digest[4],  digest[5],  digest[6],  digest[7],
++	    digest[8],  digest[9],  digest[10], digest[11], digest[12], digest[13], digest[14], digest[15],
++	    digest[16], digest[17], digest[18], digest[19], digest[20], digest[21], digest[22], digest[23],
++	    digest[24], digest[25], digest[26], digest[27], digest[28], digest[29], digest[30], digest[31]);
++	static const uint8_t known[32] = {
++		0x89,0x78,0x7c,0xb2, 0x51,0x63,0x48,0x87, 0x2f,0x26,0x53,0x03, 0x62,0x60,0xf3,0xfb,
++		0x0c,0xcc,0x87,0xd9, 0xc7,0xe5,0x2d,0x28, 0xe5,0x36,0xc6,0x88, 0xa7,0xd9,0x02,0x7c
++	};
++	if (memcmp(digest, known, 32) == 0) {
++		printf("SWEET TZ: B.2 *** metadata sha256 MATCHES host 89787cb2... - ready for TZ-B.3 ***\n");
++		return true;
++	}
++	printf("SWEET TZ: B.2 !!! metadata sha256 MISMATCH (expected 89787cb2516348872f2653036260f3fb0ccc87d9c7e52d28e536c688a7d9027c)\n");
++	return false;
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -1269,6 +1367,9 @@ SweetGPU::start(IOService *provider)
+ 	if (sweettz >= 2) {
+ 		sweet_tz_b1_check_zap_fw();
+ 	}
++	if (sweettz >= 3) {
++		sweet_tz_b2_build_metadata();
++	}
+ 	int enabled = 0;
+ 	(void)PE_parse_boot_argn("sweetgpu", &enabled, sizeof(enabled));
+ 	if (enabled < 1 || !IOService::start(provider)) {

@@ -1,0 +1,109 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -38,6 +38,10 @@
+  *   sweettz>=3 +TZ-B.2: build the metadata blob (ELF header + HASH segment, per mainline
+  *              qcom_mdt_read_metadata) and sha256-check it against the known-good
+  *              89787cb2516348872f2653036260f3fb0ccc87d9c7e52d28e536c688a7d9027c (patch 0127).
++ *   sweettz>=4 +TZ-B.3: FIRST WRITE-SIDE TrustZone call - hand the metadata blob's physical
++ *              address to PAS_INIT_IMAGE (SIP svc 2 cmd 1) so TZ can RSA-verify the zap
++ *              shader's signature against Qualcomm's root key. Read-only to Linux/Android
++ *              state; only TZ-internal PAS bookkeeping changes (patch 0128).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -1351,6 +1355,84 @@ sweet_tz_b2_build_metadata(void)
+ 	return false;
+ }
+ 
++/* ---- TZ-B.3: PAS_INIT_IMAGE (sweettz>=4) --------------------------------------------------
++ * The first call that asks TrustZone to DO something rather than answer a query. TZ reads the
++ * metadata blob (built and sha256-verified by B.2) straight out of DRAM at the physical address
++ * we hand it, walks the hash table, and checks the 2048-bit RSA signature against Qualcomm's
++ * root key fused into the SoC. On success TZ records that pas_id 13 (GPU zap shader) has a
++ * verified image pending and returns 0; PAS_MEM_SETUP (TZ-B.4) and PAS_AUTH_AND_RESET (TZ-B.5)
++ * then follow. On failure TZ returns a negative code and nothing has changed.
++ *
++ * Two things must be right or TZ will refuse:
++ *   1. The physical address must be real DRAM TZ is permitted to read. We use ml_static_vtop
++ *      on a statically-allocated kernel buffer, which is backed by ordinary physmap DRAM.
++ *   2. The buffer must be visible in DRAM, not sitting dirty in our D-cache. TZ runs with its
++ *      own MMU/cache config, so we clean-and-invalidate to PoC before the SMC.
++ * Nothing here touches the GPU, the GMU, or any Android partition. */
++extern "C" vm_offset_t ml_static_vtop(vm_offset_t vaddr);
++
++#define SURYA_CACHELINE 64u
++
++static void
++sweet_dcache_clean_poc(const void *vaddr, size_t len)
++{
++	uintptr_t a   = (uintptr_t)vaddr & ~((uintptr_t)SURYA_CACHELINE - 1u);
++	uintptr_t end = (uintptr_t)vaddr + len;
++	for (; a < end; a += SURYA_CACHELINE) {
++		__asm__ volatile ("dc civac, %0" :: "r" (a) : "memory");
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++static bool
++sweet_tz_b3_pas_init_image(void)
++{
++	if (surya_zap_metadata_len == 0) {
++		printf("SWEET TZ: B.3 metadata buffer is empty - run with sweettz>=3 so B.2 fills it\n");
++		return false;
++	}
++	uint64_t md_phys = (uint64_t)ml_static_vtop((vm_offset_t)surya_zap_metadata);
++	if (md_phys == 0) {
++		printf("SWEET TZ: B.3 ml_static_vtop(%p) returned 0 - cannot address the buffer physically\n",
++		    (void *)surya_zap_metadata);
++		return false;
++	}
++	sweet_dcache_clean_poc(surya_zap_metadata, surya_zap_metadata_len);
++	printf("SWEET TZ: B.3 metadata va=%p pa=0x%llx len=%u (dcache cleaned to PoC)\n",
++	    (void *)surya_zap_metadata, (unsigned long long)md_phys, surya_zap_metadata_len);
++
++	/* mainline qcom_scm_pas_init_image: svc=2 cmd=1,
++	 * arginfo = QCOM_SCM_ARGS(2, QCOM_SCM_VAL, QCOM_SCM_RW)
++	 *         = ((0&3)<<4) | ((2&3)<<6) | (2&0xf) = 0x82 */
++	uint64_t answer = 0;
++	int32_t rc = sweet_scm("PAS_INIT_IMAGE (GPU zap)",
++	    SCM_FAST | SCM_64 | SCM_SIP | SCM_PAS_INIT_IMAGE,
++	    0x82u, PAS_GPU, md_phys, 0, &answer);
++	if (rc == 0) {
++		printf("SWEET TZ: B.3 *** PAS_INIT_IMAGE ACCEPTED (rc=0 answer=0x%llx) ***\n",
++		    (unsigned long long)answer);
++		printf("SWEET TZ: B.3 TrustZone verified the zap shader signature - ready for TZ-B.4 (PAS_MEM_SETUP)\n");
++		return true;
++	}
++	printf("SWEET TZ: B.3 !!! PAS_INIT_IMAGE REJECTED rc=%d answer=0x%llx\n",
++	    rc, (unsigned long long)answer);
++	printf("SWEET TZ: B.3 ! rc=-1 generic / -2 bad args / -3 not supported / -4 no memory / -5 bad address\n");
++	printf("SWEET TZ: B.3 ! if bad-address: the metadata pa is outside the DRAM window TZ will read;\n");
++	printf("SWEET TZ: B.3 !   next try is a 1MB-aligned page or a known SDM845/SM7150 zap carveout.\n");
++	/* Retry once as a preemptible (non-FAST) call: some TZ builds only take PAS over the slow path. */
++	answer = 0;
++	rc = sweet_scm("PAS_INIT_IMAGE (GPU zap, preemptible)",
++	    SCM_64 | SCM_SIP | SCM_PAS_INIT_IMAGE,
++	    0x82u, PAS_GPU, md_phys, 0, &answer);
++	printf("SWEET TZ: B.3 preemptible retry rc=%d answer=0x%llx\n",
++	    rc, (unsigned long long)answer);
++	if (rc == 0) {
++		printf("SWEET TZ: B.3 *** preemptible PAS_INIT_IMAGE ACCEPTED - use the slow path from here ***\n");
++		return true;
++	}
++	return false;
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -1365,6 +1447,9 @@ SweetGPU::start(IOService *provider)
+ 	if (sweettz >= 3) {
+ 		sweet_tz_b2_build_metadata();
+ 	}
++	if (sweettz >= 4) {
++		sweet_tz_b3_pas_init_image();
++	}
+ 	int enabled = 0;
+ 	(void)PE_parse_boot_argn("sweetgpu", &enabled, sizeof(enabled));
+ 	if (enabled < 1 || !IOService::start(provider)) {

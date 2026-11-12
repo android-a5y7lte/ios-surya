@@ -17,10 +17,10 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
   *
   * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
   * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
-@@ -1207,6 +1210,52 @@ sweet_trustzone_probe(void)
+@@ -1207,6 +1210,54 @@ sweet_trustzone_probe(void)
  	printf("SWEET TZ: ===== probe done =====\n");
  }
-
+ 
 +/* ---- TZ-B.1: inspect the embedded zap shader (sweettz>=2) --------------------------------
 + * The shim bundles research/fw/a630_zap.mbn into the ADT as the "ZapFW" blob the same way
 + * patch 0108 does for "GmuFW". Here we only READ it: look it up in /chosen/memory-map,
@@ -72,7 +72,7 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
  bool
  SweetGPU::start(IOService *provider)
  {
-@@ -1215,6 +1264,9 @@ SweetGPU::start(IOService *provider)
+@@ -1215,6 +1266,9 @@ SweetGPU::start(IOService *provider)
  	if (sweettz >= 1) {
  		sweet_trustzone_probe();
  	}

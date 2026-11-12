@@ -62,6 +62,14 @@ if [ "$VARIANT" = 5 ]; then
 	else
 		echo "note: $GMUFW missing (or SURYA_GMUFW=0): GPU G4b fw-load disabled" >&2
 	fi
+	# GPU zap shader firmware (patch 0126, sweettz>=2 reads and verifies it; later
+	# TZ-B.3+ authenticates it via TrustZone PAS_INIT_IMAGE/MEM_SETUP/AUTH_AND_RESET).
+	ZAPFW=research/fw/a630_zap.mbn
+	if [ -f "$ZAPFW" ] && [ "${SURYA_ZAPFW:-1}" = 1 ]; then
+		BLOB+=(--blob "ZapFW=$ZAPFW")
+	else
+		echo "note: $ZAPFW missing (or SURYA_ZAPFW=0): GPU zap-shader TZ probe disabled" >&2
+	fi
 	[ -f research/ipsw-x/d22ap.adt ] || echo "warning: research/ipsw-x/d22ap.adt missing: iOS will see an iPod with a Home button" >&2
 else
 	KEYSLOG='sweetkeys=0 sweetlog=0'

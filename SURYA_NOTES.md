@@ -1873,3 +1873,74 @@ File formats: standard PIL ELF with METADATA program segment holding the hash ta
 parsed by Linux's drivers/soc/qcom/mdt_loader.c; signed by Qualcomm's root cert chain.
 This is a substantial patch (~300 lines: MDT parser + buffer management + PAS_INIT call) but
 it is completely tractable now that SMC is proven open. NO HFI/GMU dependence.
+
+### TZ-B.1 result (2026-11-12 22:19, patch 0126, sweettz=2): ZapFW blob rides the kernelcache intact
+Zap shader SOURCE resolved. surya has Dynamic Partitions, so `vendor` lives inside `super` and is
+not mountable from LineageOS recovery without lpdump (not present). Pulled from linux-firmware
+instead: `qcom/sdm845/a630_zap.mbn` (NOT `qcom/a615_zap.mbn`, which 404s to an HTML redirect).
+a618 and a630 are both a6xx-gen1 and share this image, same as they share a630_gmu.bin.
+  file: 14256 bytes, ELF 32-bit LSB executable, QUALCOMM DSP6, statically linked
+  host  len=14256 byte_sum=0x00125416 head=7f 45 4c 46 01 01 01 00 tail=00 00 00 d0 00 00 00 01
+ELF program headers (parsed on host):
+  ph[0] PT_NULL, filesz=0x94,  memsz=0           - ELF header + 3 phdrs (metadata part 1)
+  ph[1] PT_LOAD, flags=0x02200000 (qf=0x02=HASH), paddr=0x6000, off=0x1000, filesz=0x1988
+  ph[2] PT_LOAD, flags=0x08000007 (qf=0x08, bit27=RELOCATABLE), paddr=0x5000, off=0x3000,
+        filesz=memsz=0x7b0, align=0x100000      - the only actually-loadable segment
+Delivery: mirrors patch 0108's GmuFW path - `tools/surya-test4.sh --blob ZapFW=...` puts it in the
+ADT, XNU reads it from /chosen/memory-map and maps with ml_static_ptovirt. NOT embedded in the
+kernel binary, so swapping firmware needs no rebuild.
+ON-DEVICE (4x, one per IOService::start pass, all identical):
+  SWEET TZ: B.1 ZapFW pa=0x102514000 len=14256 byte_sum=0x00125416
+  SWEET TZ: B.1 head  7f 45 4c 46  01 01 01 00
+  SWEET TZ: B.1 tail  00 00 00 d0  00 00 00 01
+All four values byte-identical to the host computation => the image survives zip -> kernelcache ->
+ADT -> physmap with zero corruption.
+
+### TZ-B.2 result (2026-11-12 22:29, patch 0127, sweettz=3): metadata blob is bit-perfect
+Builds the PAS_INIT_IMAGE metadata exactly as mainline qcom_mdt_read_metadata does: the first
+phdrs[0].p_filesz bytes (ELF header + phdr table) concatenated with the HASH segment's contents.
+Hash segment located by (p_flags & QCOM_MDT_TYPE_MASK) == QCOM_MDT_TYPE_HASH, i.e. (7<<24) vs (2<<24).
+  host:      file[0x0..0x94] + file[0x1000..0x2988] = 0x1a1c (6684) bytes
+  host sha256: 89787cb2516348872f2653036260f3fb0ccc87d9c7e52d28e536c688a7d9027c
+ON-DEVICE (4x, all identical):
+  SWEET TZ: B.2 metadata ehdr_sz=0x94 hash_idx=1 h_off=0x1000 h_sz=0x1988 total=0x1a1c
+  SWEET TZ: B.2 buf va=0xfffffe0008088000 len=6684
+  SWEET TZ: B.2 sha256 89787cb2516348872f2653036260f3fb0ccc87d9c7e52d28e536c688a7d9027c
+sha256 computed in-kernel via libkern SHA256_Init/Update/Final (works on SWEET thanks to patch 0023
+wiring ccsha256_ltc_di directly, since there is no corecrypto kext). Buffer is a 4KB-aligned static
+in __DATA so TZ-B.3 can hand its physical address straight to TrustZone with no re-copy.
+
+### CI/tooling lessons from the 0126/0127 cycle (cost ~5 wasted runs, worth recording)
+1. **A malformed patch is SILENTLY SKIPPED, not fatal.** The build logs
+   `[warning] Skipping patch ... (already upstream, previously applied, or malformed)` and then
+   succeeds, producing a kernel with none of the intended changes. The symptom on-device is simply
+   "my new printf never appears". ALWAYS grep the build log for `Skipping.*<patch number>` before
+   concluding the code is wrong.
+2. **Two hand-written-diff failure modes caused it.** (a) A blank context line inside a hunk must be
+   a single space; editors strip the trailing space, and git apply then reports "corrupt patch at
+   line N" pointing at the NEXT hunk header. (b) The `@@ -a,b +c,d @@` counts must equal ctx+minus
+   and ctx+plus. Added `tools/check-patch.py` (with `--fix`) to catch both.
+3. **Validate before spending a CI run.** The xnu-buildtree artifact contains buildtree.tgz; extract
+   it and `git apply --check` the candidate patch against /tmp/bt/xnu. Takes a second, and it also
+   gives exact line numbers for anchoring new hunks.
+4. **The workflow does not run on push** - it is workflow_dispatch only
+   (`gh workflow run xnu.yml -R android-a5y7lte/ios-surya --ref surya`).
+5. GitHub's macOS arm64 runner pool timed out ("job was not acquired by Runner of type hosted")
+   on 3 of 7 attempts on 2026-11-12. Not a code problem; just re-fire. macos-14 is retired as of
+   2026-11-02, so macos-15 is the only option.
+
+### TZ-B.3 (IN FLIGHT, patch 0128, sweettz=4, CI run 43301977653): first write-side TrustZone call
+Hands the B.2 metadata buffer's physical address to PAS_INIT_IMAGE so TZ can RSA-verify the zap
+shader against the SoC's fused Qualcomm root key.
+  function = SCM_FAST|SCM_64|SCM_SIP|SCM_CALL(2,1) = 0xc2000201
+  arginfo  = 0x82 = QCOM_SCM_ARGS(2, QCOM_SCM_VAL, QCOM_SCM_RW)   [per mainline qcom_scm.c]
+  x2 = PAS_GPU (13), x3 = ml_static_vtop(surya_zap_metadata)
+Preconditions handled: buffer is statically allocated (physmap-backed DRAM TZ can read), and we
+`dc civac` + `dsb sy` over it before the SMC because TZ runs with its own MMU/cache config and
+would otherwise read stale DRAM. Falls back to a preemptible (non-FAST) call if FAST is refused.
+EXPECT best: rc=0 -> TZ accepted the signature; proceed to TZ-B.4 (PAS_MEM_SETUP) and B.5
+  (PAS_AUTH_AND_RESET), after which the 3D core is out of secure mode.
+EXPECT informative: negative rc. The likely constraint is the metadata physical address - downstream
+  Android passes a DT-declared carveout TZ has pre-whitelisted, and our physmap page may be outside
+  it. Next attempt would be a 1MB-aligned page or a known SDM845/SM7150 zap window.
+NOTE: nothing outside TZ's own PAS bookkeeping changes - no GPU/GMU registers, no Android partitions.

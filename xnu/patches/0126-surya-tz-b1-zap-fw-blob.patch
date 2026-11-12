@@ -1,0 +1,102 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -29,9 +29,12 @@
+  *   sweetgpu>=16 +G4d-i: COMPLETE a618 RPMH init - at WRONG time (after fw boot) (patch 0123).
+  *   sweetgpu>=17 +G4d-j: same RPMH init but at CORRECT time (before RSCC wake) (patch 0124).
+  *
+- * Independent boot-arg:
+- *   sweettz=1  probe whether the iOS hypervisor passes `smc #0` calls through to Qualcomm
+- *              TrustZone (patch 0125). Read-only (IS_CALL_AVAILABLE, PAS_IS_SUPPORTED).
++ * Independent boot-arg (TrustZone/zap-shader path - uses `smc #0`, no GPU regs):
++ *   sweettz=1  probe whether the iOS hypervisor passes `smc #0` calls through to Qualcomm
++ *              TrustZone (patch 0125). Read-only (IS_CALL_AVAILABLE, PAS_IS_SUPPORTED).
++ *   sweettz>=2 +TZ-B.1: read the "ZapFW" blob the shim injected via /chosen/memory-map
++ *              (tools/surya-test4.sh --blob ZapFW=research/fw/a630_zap.mbn), print its
++ *              length, byte-sum, and head/tail bytes to prove it survived (patch 0126).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -1207,6 +1210,52 @@ sweet_trustzone_probe(void)
+ 	printf("SWEET TZ: ===== probe done =====\n");
+ }
+
++/* ---- TZ-B.1: inspect the embedded zap shader (sweettz>=2) --------------------------------
++ * The shim bundles research/fw/a630_zap.mbn into the ADT as the "ZapFW" blob the same way
++ * patch 0108 does for "GmuFW". Here we only READ it: look it up in /chosen/memory-map,
++ * map it, verify the ELF32 QUALCOMM DSP6 header, and print length + byte-sum + head/tail
++ * so we can confirm the whole 14256-byte image survived the kernelcache end-to-end before
++ * TZ-B.2 (metadata build) uses it. No SMCs issued at this stage, no GPU registers touched. */
++static bool
++sweet_tz_b1_check_zap_fw(void)
++{
++	DTEntry mm;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &mm) != kSuccess ||
++	    SecureDTGetProperty(mm, "ZapFW", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		printf("SWEET TZ: B.1 no /chosen/memory-map ZapFW (tools/surya-test4.sh --blob ZapFW=...)\n");
++		return false;
++	}
++	uint64_t fw_pa = reg[0], fw_size = reg[1];
++	if (fw_size == 0 || fw_size > 0x8000ull) {
++		printf("SWEET TZ: B.1 bad ZapFW size 0x%llx (want nonzero, <=0x8000)\n", (unsigned long long)fw_size);
++		return false;
++	}
++	const uint8_t *fw = (const uint8_t *)ml_static_ptovirt((vm_offset_t)fw_pa);
++	if (fw == NULL) {
++		printf("SWEET TZ: B.1 could not map ZapFW pa=0x%llx\n", (unsigned long long)fw_pa);
++		return false;
++	}
++	uint32_t sum = 0;
++	for (uint64_t i = 0; i < fw_size; i++) {
++		sum += fw[i];
++	}
++	printf("SWEET TZ: B.1 ZapFW pa=0x%llx len=%llu byte_sum=0x%08x\n",
++	    (unsigned long long)fw_pa, (unsigned long long)fw_size, sum);
++	printf("SWEET TZ: B.1 head  %02x %02x %02x %02x  %02x %02x %02x %02x\n",
++	    fw[0], fw[1], fw[2], fw[3], fw[4], fw[5], fw[6], fw[7]);
++	printf("SWEET TZ: B.1 tail  %02x %02x %02x %02x  %02x %02x %02x %02x\n",
++	    fw[fw_size-8], fw[fw_size-7], fw[fw_size-6], fw[fw_size-5],
++	    fw[fw_size-4], fw[fw_size-3], fw[fw_size-2], fw[fw_size-1]);
++	if (fw[0] != 0x7f || fw[1] != 'E' || fw[2] != 'L' || fw[3] != 'F' || fw[4] != 1) {
++		printf("SWEET TZ: B.1 !!! ZapFW is not ELF32 (first bytes do not match 7f 45 4c 46 01)\n");
++		return false;
++	}
++	printf("SWEET TZ: B.1 *** ZapFW present, ELF32 header OK, %llu bytes - ready for TZ-B.2 ***\n",
++	    (unsigned long long)fw_size);
++	return true;
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -1215,6 +1264,9 @@ SweetGPU::start(IOService *provider)
+ 	if (sweettz >= 1) {
+ 		sweet_trustzone_probe();
+ 	}
++	if (sweettz >= 2) {
++		sweet_tz_b1_check_zap_fw();
++	}
+ 	int enabled = 0;
+ 	(void)PE_parse_boot_argn("sweetgpu", &enabled, sizeof(enabled));
+ 	if (enabled < 1 || !IOService::start(provider)) {
+diff --git a/tools/surya-test4.sh b/tools/surya-test4.sh
+--- a/tools/surya-test4.sh
++++ b/tools/surya-test4.sh
+@@ -60,6 +60,13 @@ if [ "$VARIANT" = 5 ]; then
+ 	else
+ 		echo "note: $GMUFW missing (or SURYA_GMUFW=0): GPU G4b fw-load disabled" >&2
+ 	fi
++	# GPU zap shader firmware (patch 0126, sweettz>=2 reads and verifies it; later
++	# TZ-B.3+ authenticates it via TrustZone PAS_INIT_IMAGE/MEM_SETUP/AUTH_AND_RESET).
++	ZAPFW=research/fw/a630_zap.mbn
++	if [ -f "$ZAPFW" ] && [ "${SURYA_ZAPFW:-1}" = 1 ]; then
++		BLOB+=(--blob "ZapFW=$ZAPFW")
++	else
++		echo "note: $ZAPFW missing (or SURYA_ZAPFW=0): GPU zap-shader TZ probe disabled" >&2
++	fi
+ 	[ -f research/ipsw-x/d22ap.adt ] || echo "warning: research/ipsw-x/d22ap.adt missing: iOS will see an iPod with a Home button" >&2
+ else
+ 	KEYSLOG='sweetkeys=0 sweetlog=0'

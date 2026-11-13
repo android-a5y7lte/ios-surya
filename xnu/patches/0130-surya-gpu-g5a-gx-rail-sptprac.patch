@@ -1,0 +1,127 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -29,5 +29,8 @@
+  *   sweetgpu>=16 +G4d-i: COMPLETE a618 RPMH init - at WRONG time (after fw boot) (patch 0123).
+  *   sweetgpu>=17 +G4d-j: same RPMH init but at CORRECT time (before RSCC wake) (patch 0124).
++ *   sweetgpu>=18 +G5-a: vote the GX rail on and enable SPTPRAC *before* the HFI handshake,
++ *              per ios-fajita's working a6xx-gen1 ladder. Vote indices are boot-args
++ *              (sweetgx=N sweetmx=N, default 3) so they can be swept (patch 0130).
+  *
+  * Independent boot-arg (TrustZone/zap-shader path - uses `smc #0`, no GPU regs):
+  *   sweettz=1  probe whether the iOS hypervisor passes `smc #0` calls through to Qualcomm
+@@ -851,3 +854,93 @@
++/* ---- G5-a: GX rail vote + SPTPRAC, before HFI ---------------------------------------------
++ * Why this exists, and why patches 0114-0124 were chasing the wrong thing:
++ *
++ * We read rscc_control_ack staying 0x00000000 as the HFI blocker and spent eight patches on
++ * it. edi194/ios-fajita (OnePlus 6T, SDM845/a630 - the same a6xx-gen1 legacy path, the same
++ * a630_gmu.bin) hit the identical symptom and records it as a NON-issue:
++ *
++ *     "rsc wake: ack=0 - the RSCC_CONTROL_ACK bit never came, while the sequencer reports
++ *      idle; their code logs that and carries on, and everything after it still works
++ *      (HFI up, firmware 1.7, TEST ACKed, GMU back in reset, SpringBoard boots)."
++ *
++ * Our code already logs-and-continues, so the ack was never blocking us procedurally. What
++ * we were missing is the step fajita runs BEFORE HFI and we deferred to "G5": the GX rail
++ * vote and SPTPRAC. Their stage-2 order is
++ *     CX/GX rail votes -> GDSCs -> clocks -> legacy flat GMU image -> SPTPRAC -> HFI v1
++ * and ours went straight from the GMU image to HFI with the 3D core unpowered - we even
++ * logged sptprac_pwr_clk=0xd4 as "expected". a618 is a615-family, so mainline marks it
++ * gmu->legacy like a630: manual SPTPRAC control, HFI v1.
++ *
++ * Sequence is mainline a6xx_gmu_gfx_rail_on + a6xx_sptprac_enable, and matches fajita's
++ * console67 log byte for byte (their offsets are the same as ours):
++ *     +0x8fe0 BOOT_SLUMBER_OPTION = 0
++ *     +0x8fe4 GX_VOTE_IDX         = vote & 0xff
++ *     +0x8fe8 MX_VOTE_IDX         = (vote >> 8) & 0xff
++ *     +0x14650 HOST2GMU_INTR_SET  = 1<<22   (OOB BOOT_SLUMBER set)
++ *       poll +0x14648 GMU2HOST_INTR_INFO for 1<<30 (ack), then clear it
++ *     +0x204  GX_SPTPRAC_PWR_CTRL = 0x778000
++ *       poll +0x14340 SPTPRAC_PWR_CLK_STATUS until (x & 0x38) == 0x28
++ *
++ * The vote indices are the one value we cannot derive yet: they come from the ARC tables in
++ * the bootloader's cmd-db, which we do not read (fajita's phone reports gfx 10 levels / mx 5
++ * and uses index 3 for the 257 MHz boot level). Surya's tables will differ, so both indices
++ * are boot-args and can be swept without a rebuild. If no index gets an OOB ack, reading
++ * cmd-db properly is the next job - not more guessing here. */
++#define GMU_BOOT_SLUMBER_OPTION   GMU_WORD(0x23f8u)  /* +0x8fe0 */
++#define GMU_GX_VOTE_IDX           GMU_WORD(0x23f9u)  /* +0x8fe4 */
++#define GMU_MX_VOTE_IDX           GMU_WORD(0x23fau)  /* +0x8fe8 */
++#define GMU_GX_SPTPRAC_PWR_CTRL   GMU_WORD(0x81u)    /* +0x204  */
++#define OOB_BOOT_SLUMBER_SET      (1u << 22)
++#define OOB_BOOT_SLUMBER_ACK      (1u << 30)
++
++static bool
++gmu_gx_rail_sptprac(vm_offset_t g)
++{
++	int gx_idx = 3, mx_idx = 3;
++	(void)PE_parse_boot_argn("sweetgx", &gx_idx, sizeof(gx_idx));
++	(void)PE_parse_boot_argn("sweetmx", &mx_idx, sizeof(mx_idx));
++	printf("SWEET GPU: G5-a gfx_rail_on: BOOT_SLUMBER_OPTION=0 GX_VOTE_IDX=%d MX_VOTE_IDX=%d"
++	    " (override with sweetgx=N sweetmx=N)\n", gx_idx, mx_idx);
++	wr(g, GMU_BOOT_SLUMBER_OPTION, 0u);
++	wr(g, GMU_GX_VOTE_IDX, (uint32_t)gx_idx & 0xffu);
++	wr(g, GMU_MX_VOTE_IDX, (uint32_t)mx_idx & 0xffu);
++
++	/* OOB BOOT_SLUMBER (legacy a6xx): set bit 22, wait for ack bit 30, clear bit 30. */
++	wr(g, GMU_GMU2HOST_INTR_CLR, OOB_BOOT_SLUMBER_ACK);
++	wr(g, GMU_HOST2GMU_INTR_SET, OOB_BOOT_SLUMBER_SET);
++	uint32_t info = 0;
++	bool oob = false;
++	for (int i = 0; i < 1000; i++) {
++		info = rd(g, GMU_GMU2HOST_INTR_INFO);
++		if (info & OOB_BOOT_SLUMBER_ACK) { oob = true; break; }
++		IODelay(10);
++	}
++	uint32_t sp = rd(g, GMU_SPTPRAC_PWR_CLK_STATUS);
++	printf("SWEET GPU: G5-a OOB boot_slumber %s (INTR_INFO 0x%08x, SPTPRAC 0x%08x)\n",
++	    oob ? "acknowledged" : "NOT acknowledged", info, sp);
++	wr(g, GMU_GMU2HOST_INTR_CLR, OOB_BOOT_SLUMBER_ACK);
++	if (!oob) {
++		printf("SWEET GPU: G5-a ! no OOB ack - the vote indices are a guess from fajita's ARC"
++		    " tables; sweep with sweetgx=N sweetmx=N (0..9) before blaming anything else\n");
++	}
++
++	/* SPTPRAC on (mainline a6xx_sptprac_enable). */
++	printf("SWEET GPU: G5-a sptprac enable: write +0x204 = 0x778000\n");
++	wr(g, GMU_GX_SPTPRAC_PWR_CTRL, 0x778000u);
++	bool on = false;
++	for (int i = 0; i < 1000; i++) {
++		sp = rd(g, GMU_SPTPRAC_PWR_CLK_STATUS);
++		if ((sp & 0x38u) == 0x28u) { on = true; break; }
++		IODelay(10);
++	}
++	printf("SWEET GPU: G5-a SPTPRAC power on: %s (status 0x%08x, want (x & 0x38) == 0x28)\n",
++	    on ? "ok" : "FAILED", sp);
++	if (on) {
++		printf("SWEET GPU: G5-a *** GX RAIL VOTED AND SPTPRAC ON - HFI now runs with the 3D"
++		    " core powered, which is what fajita's ladder does ***\n");
++	}
++	return on;
++}
++
+ static void
+ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ {
+@@ -988,4 +1081,7 @@
++	if (stage >= 9) {
++		(void)gmu_gx_rail_sptprac(g);
++	}
+-	if (stage == 1 || stage == 2 || stage == 5 || stage == 6 || stage == 7 || stage == 8) {
++	if (stage == 1 || stage == 2 || stage == 5 || stage == 6 || stage == 7 || stage == 8 || stage == 9) {
+ 		printf("SWEET GPU: G4d-d ring HFI_CTRL_INIT=1 and watch the GMU answer\n");
+ 		wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
+ 		wr(g, GMU_HFI_CTRL_INIT, 1);
+@@ -1027,3 +1123,4 @@
+ 	    : (stage == 7) ? "G4d-i(FULL_a618_RPMH_late+CTRL_INIT+GMU_INIT)"
+-	    : (stage == 8) ? "G4d-j(FULL_a618_RPMH_EARLY+CTRL_INIT+GMU_INIT)" : "G4d-?";
++	    : (stage == 8) ? "G4d-j(FULL_a618_RPMH_EARLY+CTRL_INIT+GMU_INIT)"
++	    : (stage == 9) ? "G5-a(GX_RAIL+SPTPRAC+RPMH_EARLY+CTRL_INIT+GMU_INIT)" : "G4d-?";
+ 	printf("SWEET GPU: %s send %s on q0 and poll q1 for the GMU's ack\n", stage_label, send_name);
+@@ -1659,3 +1756,3 @@
+-		int stage = enabled - 9; /* 9..13 old; 14 g; 15 h; 16 i (RPMH late); 17 j (RPMH EARLY) */
+-		if (stage > 8) { stage = 8; }
++		int stage = enabled - 9; /* 9..13 old; 14 g; 15 h; 16 i; 17 j; 18 G5-a (GX+SPTPRAC) */
++		if (stage > 9) { stage = 9; }
+ 		sweet_gpu_g4d_hfi(stage);

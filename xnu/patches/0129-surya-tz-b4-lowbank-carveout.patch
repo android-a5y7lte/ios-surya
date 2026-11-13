@@ -1,0 +1,177 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -41,7 +41,10 @@
+  *   sweettz>=4 +TZ-B.3: FIRST WRITE-SIDE TrustZone call - hand the metadata blob's physical
+  *              address to PAS_INIT_IMAGE (SIP svc 2 cmd 1) so TZ can RSA-verify the zap
+  *              shader's signature against Qualcomm's root key. Read-only to Linux/Android
+  *              state; only TZ-internal PAS bookkeeping changes (patch 0128).
++ *   sweettz>=5 +TZ-B.4: B.3 answered rc=-3145797 because the metadata sat ABOVE 4 GB. Retry
++ *              from surya's own low-bank zap carve-out gpu_region@0x97715000, after asking
++ *              TrustZone to PAS_SHUTDOWN whatever pas_id 13 already holds (patch 0129).
+  *
+  * G2 touches only the CX ("always-on") half of the GPU block: the GMU, the bus
+  * interface and the GPU SMMU. It does NOT power the GX (3D core) rail: on this
+@@ -1433,6 +1436,152 @@ sweet_tz_b3_pas_init_image(void)
+ 	return false;
+ }
+ 
++/* ---- TZ-B.4: PAS_INIT_IMAGE from the low-bank zap carve-out (sweettz>=5) -------------------
++ * B.3 handed TrustZone a metadata pointer at pa=0x102088000 and got rc=-3145797 from both the
++ * fast and the preemptible call. The arginfo (0x82) and opcode matched HakiOS exactly, so the
++ * plumbing was right - the ADDRESS was wrong.
++ *
++ * surya's /memory is two banks: <0x80000000 2G> and <0x1_00000000 0xfcc00000>. We boot with
++ * tools/mkadt.py --highmem, so every page XNU manages is in the UPPER bank, above 4 GB. Every
++ * fixed Qualcomm reserved-memory carve-out is in the LOW bank, and TrustZone's PAS reads from
++ * there. surya's own device tree declares the one we want:
++ *
++ *     gpu_region@0x97715000   size 0x2000   (removed-dma-pool, no-map)   PAS id 13
++ *
++ * (HakiOS's SM7325 analogue is ZAP_MEMORY 0x8b71a000 - same idea, same bank.) The node is
++ * no-map, so we reach it with ml_io_map (device memory) rather than a cacheable mapping;
++ * writes therefore land in DRAM directly and only need a dsb before the SMC.
++ *
++ * We also do what HakiOS does first: ask TrustZone to SHUT DOWN pas_id 13. Android's XBL
++ * authenticated a zap shader during the boot that preceded our `fastboot boot`, and TrustZone
++ * will not re-init an image it still holds. On success TZ hands the memory back cleared.
++ *
++ * SAFETY: while TrustZone owns that region a Qualcomm XPU guards it, and touching it would
++ * raise a secure-world violation (a watchdog reset - the phone reboots; nothing is written to
++ * storage and no partition is touched). So we only map and write the carve-out AFTER
++ * PAS_SHUTDOWN reports success. If TZ refuses to let go, we report that and stop without
++ * touching the memory, which is itself the answer we need.
++ *
++ * All calls use the preemptible form (SCM_64|SCM_SIP, no SCM_FAST), as both Linux's
++ * qcom_scm_pas_* and HakiOS do. */
++#define SURYA_ZAP_CARVEOUT_PA   0x97715000ull
++#define SURYA_ZAP_CARVEOUT_SIZE 0x2000u
++#define SCM_PAS_SHUTDOWN        SCM_CALL(2u, 6u)
++
++/* Verbose SMC: prints the full 64-bit x0..x3. B.3 only showed the int32 truncation of x0
++ * (-3145797 = 0xFFCFFFBB), which is not one of Qualcomm's documented SCM codes (-1..-12), so we
++ * need to see whether the top half is sign-extension or something else entirely. */
++static int32_t
++sweet_scm_verbose(const char *what, uint64_t function, uint64_t arguments,
++    uint64_t first, uint64_t second, uint64_t third, uint64_t *answer)
++{
++	uint64_t session = 0;
++	printf("SWEET TZ: B.4 smc 0x%llx (%s) arginfo 0x%llx args 0x%llx 0x%llx 0x%llx\n",
++	    (unsigned long long)function, what, (unsigned long long)arguments,
++	    (unsigned long long)first, (unsigned long long)second, (unsigned long long)third);
++	for (int i = 0; i < 100; i++) {
++		register uint64_t x0 __asm__("x0") = (i == 0) ? function : (uint64_t)SCM_INTERRUPTED;
++		register uint64_t x1 __asm__("x1") = arguments;
++		register uint64_t x2 __asm__("x2") = first;
++		register uint64_t x3 __asm__("x3") = second;
++		register uint64_t x4 __asm__("x4") = third;
++		register uint64_t x5 __asm__("x5") = 0;
++		register uint64_t x6 __asm__("x6") = session;
++		register uint64_t x7 __asm__("x7") = 0;
++		__asm__ volatile ("smc #0"
++		    : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3), "+r" (x4), "+r" (x5), "+r" (x6), "+r" (x7)
++		    : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++		session = x6;
++		if (x0 != (uint64_t)SCM_INTERRUPTED) {
++			printf("SWEET TZ: B.4   raw x0=0x%016llx x1=0x%016llx x2=0x%016llx x3=0x%016llx\n",
++			    (unsigned long long)x0, (unsigned long long)x1,
++			    (unsigned long long)x2, (unsigned long long)x3);
++			printf("SWEET TZ: B.4   -> rc=%d answer=0x%llx (after %d call(s))\n",
++			    (int32_t)x0, (unsigned long long)x1, i + 1);
++			*answer = x1;
++			return (int32_t)x0;
++		}
++	}
++	printf("SWEET TZ: B.4   INTERRUPTED 100 times in a row, giving up\n");
++	return -1;
++}
++
++static bool
++sweet_tz_b4_zap_carveout(void)
++{
++	uint64_t answer = ~0ull;
++	int32_t rc;
++
++	if (surya_zap_metadata_len == 0) {
++		printf("SWEET TZ: B.4 metadata buffer is empty - need sweettz>=3 so B.2 fills it\n");
++		return false;
++	}
++	if (surya_zap_metadata_len > SURYA_ZAP_CARVEOUT_SIZE) {
++		printf("SWEET TZ: B.4 metadata 0x%x will not fit the 0x%x carve-out\n",
++		    surya_zap_metadata_len, SURYA_ZAP_CARVEOUT_SIZE);
++		return false;
++	}
++
++	/* 1. Ask TrustZone to let go of whatever pas_id 13 holds from Android's boot. */
++	answer = ~0ull;
++	rc = sweet_scm_verbose("PAS_SHUTDOWN, release any existing zap shader",
++	    SCM_64 | SCM_SIP | SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_GPU, 0, 0, &answer);
++	if (rc != 0 || answer != 0) {
++		printf("SWEET TZ: B.4 !!! PAS_SHUTDOWN refused (rc=%d answer=0x%llx)\n",
++		    rc, (unsigned long long)answer);
++		printf("SWEET TZ: B.4 ! TrustZone is keeping a zap shader it loaded earlier, so the carve-out at\n");
++		printf("SWEET TZ: B.4 !   0x%llx is still XPU-guarded. NOT touching it (a write would be a secure\n",
++		    (unsigned long long)SURYA_ZAP_CARVEOUT_PA);
++		printf("SWEET TZ: B.4 !   violation -> watchdog reset). If TZ already holds a VALID shader the 3D core\n");
++		printf("SWEET TZ: B.4 !   may already be out of secure mode - next step is to test that directly.\n");
++		return false;
++	}
++	printf("SWEET TZ: B.4 PAS_SHUTDOWN accepted - pas_id 13 is free and the carve-out is ours to write\n");
++
++	/* 2. Put the metadata in the low-bank carve-out TrustZone will actually read. */
++	vm_offset_t zap = ml_io_map((vm_offset_t)SURYA_ZAP_CARVEOUT_PA, SURYA_ZAP_CARVEOUT_SIZE);
++	if (zap == 0) {
++		printf("SWEET TZ: B.4 could not ml_io_map the carve-out at 0x%llx\n",
++		    (unsigned long long)SURYA_ZAP_CARVEOUT_PA);
++		return false;
++	}
++	printf("SWEET TZ: B.4 carve-out pa=0x%llx mapped at va=0x%llx; it currently begins %02x %02x %02x %02x\n",
++	    (unsigned long long)SURYA_ZAP_CARVEOUT_PA, (unsigned long long)zap,
++	    *(volatile uint8_t *)(zap + 0), *(volatile uint8_t *)(zap + 1),
++	    *(volatile uint8_t *)(zap + 2), *(volatile uint8_t *)(zap + 3));
++	for (uint32_t i = 0; i < SURYA_ZAP_CARVEOUT_SIZE; i++) {
++		*(volatile uint8_t *)(zap + i) =
++		    (i < surya_zap_metadata_len) ? surya_zap_metadata[i] : 0;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	printf("SWEET TZ: B.4 wrote %u metadata bytes into the carve-out; reads back %02x %02x %02x %02x (want 7f 45 4c 46)\n",
++	    surya_zap_metadata_len,
++	    *(volatile uint8_t *)(zap + 0), *(volatile uint8_t *)(zap + 1),
++	    *(volatile uint8_t *)(zap + 2), *(volatile uint8_t *)(zap + 3));
++
++	/* 3. Offer the signature again, this time from an address TrustZone can reach. */
++	answer = ~0ull;
++	rc = sweet_scm_verbose("PAS_INIT_IMAGE, metadata in the low-bank carve-out",
++	    SCM_64 | SCM_SIP | SCM_PAS_INIT_IMAGE, 0x82u, PAS_GPU,
++	    SURYA_ZAP_CARVEOUT_PA, 0, &answer);
++	if (rc == 0 && answer == 0) {
++		printf("SWEET TZ: B.4 *** TRUSTZONE ACCEPTS THE ZAP SHADER SIGNATURE ***\n");
++		printf("SWEET TZ: B.4 ready for TZ-B.5: PAS_MEM_SETUP(13, 0x%llx, 0x1000) then write ph[2] and PAS_AUTH_AND_RESET\n",
++		    (unsigned long long)SURYA_ZAP_CARVEOUT_PA);
++		return true;
++	}
++	printf("SWEET TZ: B.4 !!! still rejected: rc=%d answer=0x%llx\n", rc, (unsigned long long)answer);
++	if (rc == -3145797) {
++		printf("SWEET TZ: B.4 ! SAME code as B.3, so the DDR bank was not the problem. Next suspect is the\n");
++		printf("SWEET TZ: B.4 !   image: a630_zap.mbn is signed for sdm845. surya wants the device-signed\n");
++		printf("SWEET TZ: B.4 !   a615_zap.mbn from github.com/sm7150-mainline/firmware-xiaomi-surya.\n");
++	} else {
++		printf("SWEET TZ: B.4 ! DIFFERENT code from B.3 (-3145797), so the address mattered. Decode the raw\n");
++		printf("SWEET TZ: B.4 !   x0 above against Qualcomm's PIL error space and adjust.\n");
++	}
++	return false;
++}
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {
+@@ -1450,6 +1599,9 @@ SweetGPU::start(IOService *provider)
+ 	if (sweettz >= 4) {
+ 		sweet_tz_b3_pas_init_image();
+ 	}
++	if (sweettz >= 5) {
++		sweet_tz_b4_zap_carveout();
++	}
+ 	int enabled = 0;
+ 	(void)PE_parse_boot_argn("sweetgpu", &enabled, sizeof(enabled));
+ 	if (enabled < 1 || !IOService::start(provider)) {

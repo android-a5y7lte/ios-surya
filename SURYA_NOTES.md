@@ -1944,3 +1944,74 @@ EXPECT informative: negative rc. The likely constraint is the metadata physical 
   Android passes a DT-declared carveout TZ has pre-whitelisted, and our physmap page may be outside
   it. Next attempt would be a 1MB-aligned page or a known SDM845/SM7150 zap window.
 NOTE: nothing outside TZ's own PAS bookkeeping changes - no GPU/GMU registers, no Android partitions.
+
+### TZ-B.3/B.4 results (2026-11-13/14, patches 0128/0129): PAS_INIT_IMAGE rejected, address ruled out
+B.3 (sweettz=4, metadata in a static __DATA buffer at pa=0x102088000, high bank):
+  PAS_INIT_IMAGE -> rc=-3145797, same from the fast (0xc2000201) and preemptible (0x42000201) calls.
+B.4 (sweettz=5, metadata in the low-bank carve-out gpu_region@0x97715000):
+  PAS_SHUTDOWN   -> rc=0, x0=0x0           *** first write-side TZ call that ever worked here ***
+  carve-out write succeeded, no XPU violation, no reboot; read back 7f 45 4c 46
+  PAS_INIT_IMAGE -> rc=-3145797 AGAIN, byte-identical.
+Full x0 = 0x00000000ffcfffbb - upper 32 bits ZERO, so NOT a sign-extended SMC64 error. Magnitude
+0x300045 is far outside Qualcomm's documented SCM space (-1..-12).
+CONCLUSION: the physical address was never the problem. Confirmed independently below.
+
+### *** THE BIG ONE: edi194/ios-fajita has our chip class working (2026-11-14) ***
+Found by searching other ports. `oosexgang` is the HakiOS org ("sexagang"); the directly useful repo is
+**edi194/ios-fajita** (OnePlus 6T, SDM845/a630) - the SAME a6xx-gen1 legacy path, the SAME a630_gmu.bin
+and a630_zap files we use. Its NOTES-FAJITA.md is a working reference. Four findings, in order of value:
+
+1. **rscc_control_ack staying 0 is NORMAL. Patches 0114-0124 chased a non-bug.** Verbatim from their
+   notes: "rsc wake: ack=0 - the RSCC_CONTROL_ACK bit never came, while the sequencer reports idle;
+   their code logs that and carries on, and everything after it still works (HFI up, firmware 1.7,
+   TEST ACKed, GMU back in reset, SpringBoard boots)." Our code ALREADY logs-and-continues (0109
+   line 71, 0114 line 233) - we were never blocked procedurally, we just misread the symptom. Eight
+   patches and most of two sessions went into this. Do not reopen it.
+
+2. **GX rail + SPTPRAC must come BEFORE HFI.** Their stage-2 order: CX/GX rail votes -> GDSCs ->
+   clocks -> legacy flat GMU image -> SPTPRAC -> HFI v1. Ours went from the GMU image straight to
+   HFI with the 3D core unpowered, and SURYA_NOTES line 1162 even logged sptprac_pwr_clk=0xd4 as
+   "expected". a618 is a615-family so mainline marks it gmu->legacy exactly like a630. Their working
+   register sequence (our byte offsets already match theirs):
+       +0x8fe0 BOOT_SLUMBER_OPTION=0; +0x8fe4 GX_VOTE_IDX; +0x8fe8 MX_VOTE_IDX
+       +0x14650 HOST2GMU_INTR_SET=1<<22, poll +0x14648 GMU2HOST_INTR_INFO for 1<<30, clear
+       +0x204 GX_SPTPRAC_PWR_CTRL=0x778000, poll +0x14340 until (x & 0x38) == 0x28
+   Implemented as G5-a, patch 0130, sweetgpu=18, vote indices as boot-args sweetgx=/sweetmx=.
+
+3. **cmd-db matters and we have never read it.** Their PDC gfx.lvl is 0x30050, not the 0x30080 Linux
+   hardcodes for a630 - "the same kind of per-device difference Bergamota's note mentions for a618".
+   We hardcoded A618_PDC_ADDRESS_OFFSET=0x30090 from mainline XML. The ARC tables that give the GX/MX
+   vote indices come from the same place (their phone: gfx 10 levels, mx 5, cx 8; index 3 at the
+   257 MHz boot level). Reading cmd-db properly is the next real job.
+
+4. **The zap needs the GPU POWERED** - it is their stage 7c, after cp hw_init and CP_ME_INIT, and
+   HakiOS's step_zap_load() opens with `if (!cx_ready() || !core_is_on)`. We ran sweettz=4/5 with no
+   sweetgpu at all, i.e. asked TrustZone to load a GPU shader onto a GPU that was switched off. That,
+   not the address, is the most likely cause of rc=-3145797. Their successful call is byte-identical
+   to ours in fn/arginfo/pas_id, and their metadata sits at pa=0x102501000 - ABOVE 4 GB, which
+   independently confirms the DDR bank was a red herring.
+
+Other ports worth knowing: dipa-studio/ios-sweet (same SM7150 SoC), qdizax-w/hakios-sm7125 (miatoll,
+same Adreno 618), oosexgang/hakios-xnu-kernel + hakios-sm7325/mt6768/thor/dodge.
+
+### OPEN: pmap_assert_free panic at ~50 s (2026-11-14, three reproductions)
+Every sweetgpu boot tonight panics identically ~46-54 s in:
+  panic(cpu 1 caller 0xfffffe00074767dc): pmap_assert_free: Found at least one mapping to
+  0x1040XX000. First PTEP is a Kernel CPU mapping (pmap: 0xfffffe0007bf5730) @pmap.c:2811
+Same caller, same tid 170, same backtrace; only the page (0x10402c000 / 0x10406c000) and timing move.
+("handshake structure not initialized" underneath is a RED HERRING - fajita line 385 identifies it as
+osfmk/kdp/output_stages/out_shmem.c:499, "no shared-memory debugger; harmless, not a second failure.")
+The log ring does NOT survive it: after each panic the header still read "total 336413 bytes, flush #27",
+byte-identical to the previous night's pull, so nothing from these boots reached UFS - we are flying
+blind on G5-a's actual OOB/SPTPRAC result.
+PRIME SUSPECT (predates 0130, from patch 0114): in sweet_gpu_g4d_hfi,
+    uint64_t hfi_phys = kvtophys(hfi_kva);
+    vm_offset_t hfi_unc = ml_io_map_wcomb((vm_offset_t)hfi_phys, ...);
+hfi_kva is a KERNEL-ALLOCATED buffer, i.e. VM-managed DRAM. Mapping its physical address again through
+the IO path creates a kernel mapping the pmap does not account for and that we never tear down; when
+the VM later frees that page it finds the stray mapping and asserts. Every other ml_io_map we do is on
+real MMIO (GMU/PDC/GPUCC/SMMU) or the low-bank carve-out, which are not VM-managed - this one is the
+odd one out, and 0x1040xx000 is exactly where kernel allocations live.
+NEXT: confirm whether sweetgpu=17 panics too (if yes, 0130 is innocent and this is a 0114-era bug).
+Fix is to stop double-mapping: either ml_io_unmap before returning, or drop hfi_unc entirely and use
+hfi_kva with explicit dc civac maintenance (patch 0128 already has sweet_dcache_clean_poc).

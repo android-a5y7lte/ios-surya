@@ -2277,3 +2277,10 @@ ml_io_map'd so no cache maintenance, HFI_QTBL_ADDR and PWR_COL_CP_MSG given PHYS
 sweetlowhfi unset keeps the existing SMMU path exactly, so one kernel tests both:
   ARGS='sweetgpu=10'                 -> 0143 only (SMMU path, legacy queue ids)
   ARGS='sweetgpu=10 sweetlowhfi=1'   -> fajita addressing, no SMMU for the GMU
+
+### CI LESSON: never trigger a build while one is in progress
+Run 43645611500 (0143) was CANCELLED, not failed: triggering 43646199005 (0144) while it was still
+building killed it. The workflow has a concurrency group that cancels in-progress runs. Either wait
+for the run to finish, or batch the patches into one trigger - and remember that `gh run watch`
+reporting "cancelled" with a clean "Applying patch" line means exactly this, not a patch problem.
+No loss here because 0144 is boot-arg gated, so the one surviving build tests both paths.

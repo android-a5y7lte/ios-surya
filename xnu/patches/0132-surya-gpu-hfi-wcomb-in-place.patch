@@ -1,0 +1,65 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index fad0b1a..221d3e8 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -72,6 +72,10 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern "C" vm_offset_t ml_static_ptovirt(vm_offset_t paddr);
+ extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+ extern "C" uint64_t kvtophys(vm_offset_t va);
++extern "C" void pmap_set_cache_attributes(ppnum_t pn, unsigned int attr);
++/* osfmk/arm/memory_types.h: VM_MEM_NOT_CACHEABLE|VM_MEM_COHERENT. Not included
++ * directly because that header is not reachable from iokit. */
++#define SURYA_VM_WIMG_WCOMB 0x6u
+ 
+ class SweetGPU : public IOService {
+ 	OSDeclareDefaultStructors(SweetGPU);
+@@ -716,6 +720,25 @@ gmu_build_context(vm_offset_t *buffers_out)
+ 	kr = kmem_alloc(kernel_map, &buffers, round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE),
+ 	    (kma_flags_t)(KMA_KOBJECT | KMA_ZERO | KMA_DATA), VM_KERN_MEMORY_IOKIT);
+ 	if (kr != KERN_SUCCESS) { printf("SWEET GPU: G4d no memory for GMU buffers (%d)\n", kr); return false; }
++	/* Make these pages write-combining IN PLACE, rather than taking a second
++	 * ml_io_map_wcomb over them later. ml_io_map* on VM-managed RAM leaves a kernel
++	 * mapping the pmap does not account for, and when the VM later frees the page it
++	 * panics: "pmap_assert_free: Found at least one mapping to 0x1040XX000 ... is a
++	 * Kernel CPU mapping" (seen three times on 2026-11-14, ~50 s into every boot, and
++	 * it took the log ring with it). ios-fajita states the rule outright: "never
++	 * ml_io_map on managed RAM" - use pmap_set_cache_attributes instead. That call
++	 * needs patch 0131 first, because pmap_sync_page_attributes_phys truncated the
++	 * physical address to 32 bits and all our RAM is above 4 GiB. */
++	{
++		vm_size_t bufsz = round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE);
++		for (vm_size_t off = 0; off < bufsz; off += PAGE_SIZE) {
++			ppnum_t pn = (ppnum_t)(kvtophys(buffers + off) >> PAGE_SHIFT);
++			pmap_set_cache_attributes(pn, SURYA_VM_WIMG_WCOMB);
++		}
++		printf("SWEET GPU: G4d GMU buffers 0x%llx..+0x%llx set write-combining in place"
++		    " (no ml_io_map over managed RAM)\n",
++		    (unsigned long long)kvtophys(buffers), (unsigned long long)bufsz);
++	}
+ 	*buffers_out = buffers;
+ 
+ 	uint64_t *l1 = (uint64_t *)(tables + 0x0000u);
+@@ -1125,15 +1148,14 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	    : (stage == 9) ? "G5-a(GX_RAIL+SPTPRAC+RPMH_EARLY+CTRL_INIT+GMU_INIT)" : "G4d-?";
+ 	printf("SWEET GPU: %s send %s on q0 and poll q1 for the GMU's ack\n", stage_label, send_name);
+ 	uint64_t hfi_phys = kvtophys(hfi_kva);
+-	vm_offset_t hfi_unc = ml_io_map_wcomb((vm_offset_t)hfi_phys,
+-	    (vm_size_t)(GMU_MAP_PAGES - GMU_HFI_PAGE0) * SMMU_GRANULE);
+-	if (hfi_unc == 0) {
+-		printf("SWEET GPU: %s ml_io_map_wcomb failed - abort\n", stage_label);
+-		return;
+-	}
+-	volatile struct hfi_table *hfi_u = (volatile struct hfi_table *)hfi_unc;
+-	volatile uint32_t *q0_data = (volatile uint32_t *)(hfi_unc + HFI_QUEUE_AT(0));
+-	volatile uint32_t *q1_data = (volatile uint32_t *)(hfi_unc + HFI_QUEUE_AT(1));
++	/* The pages were switched to write-combining at allocation time, so the ordinary
++	 * kernel VA already has the attributes the GMU needs - no second mapping, and no
++	 * stray pmap entry to panic on later. */
++	volatile struct hfi_table *hfi_u = (volatile struct hfi_table *)hfi_kva;
++	volatile uint32_t *q0_data = (volatile uint32_t *)(hfi_kva + HFI_QUEUE_AT(0));
++	volatile uint32_t *q1_data = (volatile uint32_t *)(hfi_kva + HFI_QUEUE_AT(1));
++	printf("SWEET GPU: %s hfi buffer kva 0x%llx phys 0x%llx (write-combining in place)\n",
++	    stage_label, (unsigned long long)hfi_kva, (unsigned long long)hfi_phys);
+ 	/* HakiOS hfi_send: pad every message to a 4-dword (16-byte) slot with 0xfafafafa
+ 	 * fillers and advance queue->write by the PADDED length. The firmware parses the
+ 	 * queue in 16-byte slots: an unaligned write index makes it parse dword 5 as the

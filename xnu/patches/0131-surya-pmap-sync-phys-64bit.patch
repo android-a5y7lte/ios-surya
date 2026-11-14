@@ -1,0 +1,23 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 00568d3..f4696f4 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -6881,7 +6881,17 @@ void
+ pmap_sync_page_attributes_phys(
+ 	ppnum_t pp)
+ {
+-	flush_dcache((vm_offset_t) (pp << PAGE_SHIFT), PAGE_SIZE, TRUE);
++	/*
++	 * SWEET/surya: ptoa() widens before the shift, (pp << PAGE_SHIFT) does not -
++	 * it is a 32-bit shift that drops bit 32 and above. Apple's coherent-IO SoCs
++	 * make flush_dcache a no-op so the truncation never showed there, but surya
++	 * boots with mkadt.py --highmem and EVERY page the kernel manages is above
++	 * 4 GiB, so the address handed to flush_dcache was garbage. This blocks
++	 * pmap_set_cache_attributes(), which is how a kernel-allocated buffer is
++	 * made write-combining without a second ml_io_map over managed RAM.
++	 * Ported from mxtpasontop/ios-sweet branch gpu, patch 0083 (same SM7150).
++	 */
++	flush_dcache((vm_offset_t) ptoa(pp), PAGE_SIZE, TRUE);
+ }
+ 
+ #if CONFIG_COREDUMP

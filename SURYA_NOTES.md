@@ -2349,3 +2349,32 @@ word and the decoded version. Reads either:
 NEXT AFTER THAT: gpu_dcvs_votes (cmd-db parse: gfx.lvl 0x30050, mx.lvl 0x30010, cx.lvl 0x30000) feeding
 H2F_MSG_PERF_TBL + H2F_MSG_BW_VOTE_TBL + H2F_MSG_TEST, which completes a6xx_gmu_hfi_start. Then the
 GX rail (0130, already working) and the CP ladder.
+
+### 0145 RESULT (2026-11-15 00:44): FW_VER unanswered - and it exposed TWO real bugs
+  192: G4d-e FW_VER sent hdr=0x00200205 at q0[w=8]; q1[w=4->4] intr=0x00000000
+  193: G4d-e FW_VER got no answer; MSG_INIT acked but the protocol stops there
+  195: ... fsr=0x00000400 ... (no fault bits; 0x400 is FORMAT=AArch64, which is normal)   <- fix works
+The CM3_FAULT on line 194 comes from the MSG_INIT poll (intr_info=0x00800001), not the FW_VER poll
+(vintr=0): the M3 crashed right AFTER writing a correct ack. Two causes, both ours:
+
+1. THE H2F MESSAGE IDS WERE WRONG ALL ALONG. From mxt/KGSL:
+     H2F_MSG_INIT 0   H2F_MSG_FW_VER 1   H2F_MSG_BW_VOTE_TBL 3   H2F_MSG_PERF_TBL 4   H2F_MSG_TEST 5
+   We sent id 1 as "GMU_INIT" - id 1 is FW_VER. So every run has been sending FW_VER with a 5-dword
+   MSG_INIT payload attached, and the log says so plainly in hindsight: the ack echoed id 1
+   (dw1=0x00100001) and returned a VERSION in dw3 (0x10080000), which is FW_VER's reply, not
+   MSG_INIT's. The firmware answered the id we asked for and then faulted on the oversized body.
+   0145's own "FW_VER" used id 5, which is H2F_MSG_TEST. Header layout is otherwise identical to
+   mxt's MSG_HDR: id bits 7:0, dw 15:8, type 19:16 (mxt sends no seq; ours sets bits 20+, and the
+   firmware echoed it happily, so seq is not the problem - left alone to change one thing at a time).
+
+2. WE NEVER DRAINED THE RESPONSE QUEUE. mxt's hfi_read ends with
+     gm_wr(hfi_qh(q, QH_READ_INDEX), rd);
+   and every log of ours reads `q1[r=0 w=4]` - read never moved. From the GMU's side the queue it
+   must write into is still occupied, which is exactly "answers once, then silent".
+
+### Patch 0146: correct H2F ids (INIT=0, FW_VER=1, TEST=5) + advance queue[1].read
+NEXT SESSION: boot `ARGS='sweetgpu=11'` on run 43650… and look for a REAL MSG_INIT ack (id 0 echoed,
+error 0) followed by a FW_VER ack, i.e. "TWO MESSAGES ACKNOWLEDGED", and for CM3_FAULT to be GONE
+from intr_info. After that: gpu_dcvs_votes (cmd-db: gfx.lvl 0x30050, mx.lvl 0x30010, cx.lvl 0x30000)
+-> H2F_MSG_PERF_TBL (id 4) + H2F_MSG_BW_VOTE_TBL (id 3) + H2F_MSG_TEST (id 5) completes
+a6xx_gmu_hfi_start; then GX rail (0130, works) and the CP ladder.

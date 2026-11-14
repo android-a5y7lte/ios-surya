@@ -1,0 +1,54 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 4cb8dbf..18dda57 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1469,7 +1469,20 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	if (stage < 2) {
+ 		return;
+ 	}
+-	uint32_t send_id = (stage == 3) ? 0x05u : 0x01u;
++	/*
++	 * THE H2F MESSAGE IDS WERE WRONG. mxtpasontop/ios-sweet, straight from KGSL:
++	 *   H2F_MSG_INIT 0   H2F_MSG_FW_VER 1   H2F_MSG_BW_VOTE_TBL 3
++	 *   H2F_MSG_PERF_TBL 4   H2F_MSG_TEST 5
++	 * We sent id 1 for "GMU_INIT", which is FW_VER - so every run so far has been
++	 * sending FW_VER with a five-dword MSG_INIT payload bolted on. That is exactly what
++	 * the logs show: the ack echoed id 1 (dw1=0x00100001) and returned a VERSION in dw3
++	 * (0x10080000), which is FW_VER's reply, not MSG_INIT's, and then the firmware set
++	 * CM3_FAULT on the oversized body. 0145's "FW_VER" used id 5, which is TEST.
++	 */
++#define H2F_MSG_INIT_ID     0x00u
++#define H2F_MSG_FW_VER_ID   0x01u
++#define H2F_MSG_TEST_ID     0x05u
++	uint32_t send_id = (stage == 3) ? H2F_MSG_TEST_ID : H2F_MSG_INIT_ID;
+ 	const char *send_name = (stage == 3) ? "HFI_TEST" : "GMU_INIT";
+ 	const char *stage_label = (stage == 2) ? "G4d-e"
+ 	    : (stage == 3) ? "G4d-f(TEST, no CTRL_INIT)"
+@@ -1536,6 +1549,17 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		uint32_t ack_type = (ack_hdr >> 16) & 0xfu;
+ 		printf("SWEET GPU: %s q1 ack hdr=0x%08x (id=0x%02x size=%u type=%u) dw1=0x%08x dw2=0x%08x dw3=0x%08x\n",
+ 		    stage_label, ack_hdr, ack_id, ack_size, ack_type, q1_data[1], q1_data[2], q1_data[3]);
++		/*
++		 * DRAIN THE QUEUE. mxt's hfi_read ends with
++		 *   gm_wr(hfi_qh(q, QH_READ_INDEX), rd);
++		 * and we never advanced queue[1].read at all - every log reads q1[r=0 w=4].
++		 * Leaving the response queue permanently undrained is why the GMU answers once
++		 * and then goes silent: from its side the queue it must write into is still
++		 * occupied. Advance read to write, as the receiver is required to.
++		 */
++		hfi_u->queue[1].read = q1_w;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		printf("SWEET GPU: %s drained q1: read advanced 0 -> %u\n", stage_label, q1_w);
+ 	}
+ 	if ((s3 & 1u) != 0u || q1_w != 0u) {
+ 		printf("SWEET GPU: %s *** HFI HANDSHAKE SUCCEEDED *** (status 0x%08x, q1_write=%u). The kernel is talking to the GMU. Next: perf/bw tables, then GX rail up.\n",
+@@ -1550,7 +1574,8 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		 * Sequence numbers must advance: MSG_INIT used seq 1, so this is seq 2.
+ 		 */
+ 		uint32_t w1 = hfi_u->queue[0].write;
+-		uint32_t vhdr = 0x05u | (2u << 8) | (0u << 16) | (2u << 20); /* FW_VER, 2 dw, seq 2 */
++		/* id 1 = H2F_MSG_FW_VER. 0145 used 5, which is H2F_MSG_TEST. */
++		uint32_t vhdr = H2F_MSG_FW_VER_ID | (2u << 8) | (0u << 16) | (2u << 20);
+ 		q0_data[w1 + 0u] = vhdr;
+ 		q0_data[w1 + 1u] = 0x10080000u;     /* the version we support: 1.8, as mxt sends */
+ 		q0_data[w1 + 2u] = 0xfafafafau;

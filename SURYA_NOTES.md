@@ -2155,3 +2155,40 @@ READ: if QTBL_ADDR reads back 0 the firmware never had a table and every host-si
 on was correcting something the GMU could not see. If everything reads back correctly AND the fence
 is already open, then the firmware has its full configuration and still does nothing, and the fault
 is in what the GMU core itself needs to run - clocks, TCM retention, or the image load address.
+
+### 0141 RESULT (2026-11-14): config is COMPLETE and VERIFIED, fence is OPEN, still 0xfe
+  G4d-l AHB fence BEFORE ctrl=0x00000000 range0=0 range1=0 status=0
+  G4d-l qtbl_addr=0x60100000 (want 0x60100000)  qtbl_info=1 (want 1)  boot_config=2 (want 2)
+  G4d-l cm3_cfg=0x00000052 (want 0x4052)  general_7=1 (want 1)  sfr_addr=0x06018000 (want 0x06018000)
+  G4d-l cp_msg=0x60300000 (want 0x60300000)  fence_ctrl=0  fence_status=0  rpmh_ctrl=0x00000f11
+Every register the firmware needs reads back correct. The AHB fence was already OPEN, so nothing was
+being dropped: CM3_CFG bit 14 is simply READ-ONLY on this silicon (everything else sticks exactly).
+The fence theory is dead.
+
+CORRECTION to the 0140 entry above: "the firmware does nothing" was too strong. 0xbabeface is the
+BOOT-DONE marker the firmware writes at the END of its init, so init completes. The DTCM version
+words were weak evidence - mxt's 1.17 comes from the H2F_MSG_FW_VER HFI REPLY (notes line 107: "H2F_MSG
+_FW_VER ACK for seq 2 ... GMU firmware 0x10110000"), NOT from DTCM, so those words may simply never be
+populated by this firmware. The log and queue headers being untouched is consistent with a firmware
+that booted fine and refuses CTRL_INIT before it has any reason to write either.
+ACCURATE STATEMENT: the GMU boots completely, its configuration is verified correct, and it
+DELIBERATELY answers 0xfe to HFI_CTRL_INIT. Treat 0xfe as a firmware rejection code.
+
+KGSL confirms our register semantics (adreno_a6xx_gmu.c, a6xx_gmu_hfi_start):
+    gmu_core_regwrite(device, A6XX_GMU_HFI_CTRL_INIT, 1);
+    if (timed_poll_check(device, A6XX_GMU_HFI_CTRL_STATUS, BIT(0), GMU_START_TIMEOUT, BIT(0)))
+so bit 0 is the ack and 0xfe (bit 0 clear) is a real failure, not a misread. KGSL writes NOTHING
+before CTRL_INIT, and mxt's hfi_start (their lines 1721-1745) is identical to ours. The HFI start
+sequence is not the difference either.
+
+### Patch 0142: is the firmware EXECUTING or WEDGED? (G4d-m, diagnostics)
+The one question left that does not require guessing. The image is flat: ITCM (16 KiB) then DTCM
+(16 KiB). Compare the live TCM against the GmuFW blob we loaded:
+- DTCM CHANGED  => the firmware is executing (it wrote its own stacks/variables), so it is making a
+  deliberate decision to reject CTRL_INIT, and the next thing to find is WHY it rejects - a firmware
+  /protocol expectation, not a register.
+- DTCM PRISTINE => it wrote the boot marker and wedged immediately, and the fault is in what the core
+  needs to RUN: its clock (we set gmu rcg cfg=0x602 - compare against mxt), TCM retention, or the
+  boot vector. Nothing we hand it matters.
+- ITCM differing at all would mean the load address or image layout is wrong (it is code; it should
+  not change).

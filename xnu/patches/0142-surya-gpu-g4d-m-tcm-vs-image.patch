@@ -1,0 +1,61 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 260623a..96786e9 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1315,6 +1315,56 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 			printf("SWEET GPU: G4d-k log[%02u] %08x %08x %08x %08x\n",
+ 			    i, lg[i], lg[i + 1u], lg[i + 2u], lg[i + 3u]);
+ 		}
++
++		/*
++		 * G4d-m: IS THE FIRMWARE EXECUTING, OR WEDGED? 0141 proved the configuration is
++		 * complete and verified and the AHB fence is open, and the firmware still
++		 * answers 0xfe. The remaining question is whether it is running at all after it
++		 * writes its 0xbabeface boot marker.
++		 *
++		 * Compare the TCM against the image we loaded. The image is flat: ITCM (16 KiB)
++		 * then DTCM (16 KiB). A firmware that is executing writes its own stacks and
++		 * variables into DTCM, so DTCM MUST differ from the image. If DTCM still matches
++		 * the image byte for byte, the core wrote the marker and wedged immediately, and
++		 * the fault is in what it needs to RUN - its clock, TCM retention, or the boot
++		 * vector - not in anything we hand it. ITCM is code and should NOT differ; if it
++		 * does, the load address or image layout is wrong.
++		 */
++		DTEntry mmv;
++		uintptr_t const *regv = NULL;
++		unsigned int szv = 0;
++		if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &mmv) == kSuccess &&
++		    SecureDTGetProperty(mmv, "GmuFW", (void const **)&regv, &szv) == kSuccess &&
++		    szv >= 2 * sizeof(uintptr_t)) {
++			uint64_t fwpa = regv[0], fwsz = regv[1];
++			const uint32_t *fwi = (const uint32_t *)ml_static_ptovirt((vm_offset_t)fwpa);
++			if (fwi != NULL && fwsz >= 0x8000u) {
++				uint32_t itcm_diff = 0, dtcm_diff = 0, first = 0xffffffffu;
++				for (uint32_t i = 0; i < 0x2000u; i++) {
++					uint32_t live = rd(g, GMU_ITCM + 4u * i);
++					if (live != fwi[i]) {
++						if (i < 0x1000u) {
++							itcm_diff++;
++						} else {
++							dtcm_diff++;
++						}
++						if (first == 0xffffffffu) { first = i; }
++					}
++				}
++				printf("SWEET GPU: G4d-m TCM vs loaded image: ITCM %u/4096 dwords differ, DTCM %u/4096 differ, first diff at word %u\n",
++				    itcm_diff, dtcm_diff, first);
++				printf("SWEET GPU: G4d-m DTCM %s => firmware %s\n",
++				    dtcm_diff ? "CHANGED" : "PRISTINE",
++				    dtcm_diff ? "IS executing (it wrote its own RAM)" :
++				    "WEDGED right after the boot marker (never touched its own RAM)");
++				for (uint32_t i = 0x1000u; i < 0x1008u; i += 4u) {
++					printf("SWEET GPU: G4d-m dtcm[%u] live %08x %08x %08x %08x | image %08x %08x %08x %08x\n",
++					    i - 0x1000u, rd(g, GMU_ITCM + 4u * i), rd(g, GMU_ITCM + 4u * (i + 1u)),
++					    rd(g, GMU_ITCM + 4u * (i + 2u)), rd(g, GMU_ITCM + 4u * (i + 3u)),
++					    fwi[i], fwi[i + 1u], fwi[i + 2u], fwi[i + 3u]);
++				}
++			}
++		}
+ 	}
+ 
+ 	/* G4d-e: send the first H2F message - GMU_INIT - on queue 0 and watch for the GMU's

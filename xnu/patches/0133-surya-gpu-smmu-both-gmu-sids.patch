@@ -1,0 +1,60 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 221d3e8..385c879 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -647,6 +647,17 @@ sweet_gpu_g4d_smmu_probe(void)
+                                          * (HakiOS's 0x400 is SM7325's 2-cell binding; writing an
+                                          * unused mask bit made this SMMU drop the whole SMR write) */
+ #define GMU_SMMU_MATCH      1u          /* stream-table entry to use (0 kept for the 3D core) */
++#define GMU_SMMU_STREAM2    4u          /* the GMU issues on TWO stream ids. mainline's dt names only
++                                         * 5 (gmu_kernel); 4 is gmu_user, and its transactions matched
++                                         * nothing in our table, so they never reached the context bank.
++                                         * mxtpasontop/ios-sweet gpu 0085 programs SMR0=0x80000005 and
++                                         * SMR1=0x80000004 and HFI comes up; ios-fajita says the same
++                                         * ("stream IDs 5 and 4 -> context 0"). */
++#define GMU_SMMU_MATCH2     2u          /* second stream-table entry (for stream id 4) */
++#define SMMU_S2CR_PRIV      (3u << 8)   /* PRIVCFG=3: force transactions privileged. Our PTEs carry
++                                         * AP=0 (privileged RW, unprivileged none), so without this an
++                                         * unprivileged GMU access takes a permission fault. Both
++                                         * 0085 (S2CR 0x300) and fajita ((3<<8)|cb) set it. */
+ #define GMU_IOVA_BASE       0x60000000u /* L1=1 L2=0 L3=0; all pages are L3[0..n], same L1/L2 */
+ #define GMU_IOVA_LOG        0x60002000u /* 16K firmware log (pages 2..5) */
+ #define GMU_IOVA_HFI        0x60006000u /* HFI table + 3 queues (pages 6..9, 16K) */
+@@ -776,22 +787,33 @@ gmu_build_context(vm_offset_t *buffers_out)
+ 	uint32_t tlb = 0;
+ 	for (int i = 0; i < 500; i++) { tlb = smmu_rd(cb, SMMU_CB_TLBSTATUS); if ((tlb & 1u) == 0) { break; } IODelay(10); }
+ 	smmu_wr(cb, SMMU_CB_SCTLR, SMMU_SCTLR_ON);
+-	smmu_wr(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH, GMU_CTX);
++	smmu_wr(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH, SMMU_S2CR_PRIV | GMU_CTX);
+ 	smmu_wr(s, SMMU_SMR0 + 4u * GMU_SMMU_MATCH, SMMU_SMR_VALID | (GMU_SMMU_MASK << 16) | GMU_SMMU_STREAM);
++	smmu_wr(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH2, SMMU_S2CR_PRIV | GMU_CTX);
++	smmu_wr(s, SMMU_SMR0 + 4u * GMU_SMMU_MATCH2, SMMU_SMR_VALID | (GMU_SMMU_MASK << 16) | GMU_SMMU_STREAM2);
+ 
+ 	uint32_t smr   = smmu_rd(s, SMMU_SMR0 + 4u * GMU_SMMU_MATCH);
+ 	uint32_t s2cr  = smmu_rd(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH);
++	uint32_t smr2  = smmu_rd(s, SMMU_SMR0 + 4u * GMU_SMMU_MATCH2);
++	uint32_t s2cr2 = smmu_rd(s, SMMU_S2CR0 + 4u * GMU_SMMU_MATCH2);
+ 	uint32_t sctlr = smmu_rd(cb, SMMU_CB_SCTLR);
+ 	uint32_t tlo   = smmu_rd(cb, SMMU_CB_TTBR0_LO);
+ 	uint32_t thi   = smmu_rd(cb, SMMU_CB_TTBR0_HI);
+ 	uint32_t cbar  = smmu_rd(gr1, SMMU_CBAR(0, GMU_CTX));
+ 	uint32_t fsr   = smmu_rd(cb, SMMU_CB_FSR);
+ 	bool ok = smr == (SMMU_SMR_VALID | (GMU_SMMU_MASK << 16) | GMU_SMMU_STREAM) &&
+-	    (s2cr & 0x300ffu) == GMU_CTX && (sctlr & 1u) != 0 &&
++	    smr2 == (SMMU_SMR_VALID | (GMU_SMMU_MASK << 16) | GMU_SMMU_STREAM2) &&
++	    (s2cr & 0x300ffu) == (SMMU_S2CR_PRIV | GMU_CTX) &&
++	    (s2cr2 & 0x300ffu) == (SMMU_S2CR_PRIV | GMU_CTX) && (sctlr & 1u) != 0 &&
+ 	    tlo == (uint32_t)ttbr0 && thi == (uint32_t)(ttbr0 >> 32) &&
+ 	    (cbar & 0x30000u) == (SMMU_CBAR_STAGE1 & 0x30000u);
+-	printf("SWEET GPU: G4d-ctx readback smr=0x%08x s2cr=0x%08x cbar=0x%08x sctlr=0x%08x (M=%u) ttbr0=0x%08x%08x fsr=0x%08x\n",
+-	    smr, s2cr, cbar, sctlr, sctlr & 1u, thi, tlo, fsr);
++	/* NB fsr bit 10 (0x400) is the FORMAT field (AArch64), NOT a fault - mxtpasontop's
++	 * 0085/0086 logs read "CB0 FSR 0x400 (FORMAT=AArch64 only, no fault)". Real fault
++	 * bits are SMMU_FSR_FAULTS (0xc00001fe). */
++	printf("SWEET GPU: G4d-ctx readback smr=0x%08x s2cr=0x%08x smr2=0x%08x s2cr2=0x%08x cbar=0x%08x"
++	    " sctlr=0x%08x (M=%u) ttbr0=0x%08x%08x fsr=0x%08x%s\n",
++	    smr, s2cr, smr2, s2cr2, cbar, sctlr, sctlr & 1u, thi, tlo, fsr,
++	    (fsr & SMMU_FSR_FAULTS) ? " <-- REAL FAULT BITS" : " (no fault bits)");
+ 	return ok;
+ }
+ 

@@ -1,0 +1,61 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index fc0a512..f346768 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -135,6 +135,14 @@ OSDefineMetaClassAndStructors(SweetGPU, IOService);
+ #define GMU_WORD(n)                     (4u * (n))
+ #define GMU_CM3_SYSRESET                GMU_WORD(0x5000u)
+ #define GMU_CM3_BOOT_CONFIG             GMU_WORD(0x5001u)
++/* KGSL a6xx_gmu_device_start writes 0 here ("Disable GMU WFI") between holding and
++ * releasing CM3_SYSRESET, and mxtpasontop/ios-sweet gpu copies it. We never wrote it.
++ * If the CM3 is allowed into wait-for-interrupt it will not service the HFI init
++ * handshake - which is what CTRL_STATUS 0xfe looks like from our side. Register
++ * number is KGSL 0x1f802 less the 0x1a800 KGSL/mainline offset, confirmed against
++ * SYSRESET 0x1f800/0x5000, BOOT_CONFIG 0x1f801/0x5001, FW_INIT_RESULT 0x1f81c/0x501c
++ * and CM3_CFG 0x1f82d/0x502d. */
++#define GMU_CX_GMU_WFI_CONFIG           GMU_WORD(0x5002u)
+ #define GMU_CM3_FW_INIT_RESULT          GMU_WORD(0x501cu) /* 0xbabeface once fw has started */
+ #define GMU_CM3_CFG                     GMU_WORD(0x502du)
+ #define GMU_SPTPRAC_PWR_CLK_STATUS      GMU_WORD(0x50d0u)
+@@ -460,6 +468,7 @@ sweet_gpu_g4c_boot(void)
+ 	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
+ 
+ 	/* let the processor run */
++	wr(g, GMU_CX_GMU_WFI_CONFIG, 0u);   /* KGSL: disable GMU WFI before release */
+ 	wr(g, GMU_CM3_SYSRESET, 0);
+ 	uint32_t r = 0;
+ 	for (int i = 0; i < 5000; i++) {
+@@ -1096,12 +1105,20 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		printf("SWEET GPU: G4d-j wrote full RPMH init early; next: RSCC wake + release reset\n");
+ 	}
+ 
+-	/* wake the GMU's RPMh channel (as G4c) */
+-	wr(g, GMU_RSCC_CONTROL_REQ, 2);
++	/* wake the GMU's RPMh channel (as G4c). mxtpasontop/ios-sweet gpu boots the GMU
++	 * with NO rsc wake at all and HFI comes up; we have always done this handshake and
++	 * the ack has never arrived. sweetrscc=0 skips it, so both can be tried without a
++	 * rebuild. */
++	int do_rscc = 1;
++	(void)PE_parse_boot_argn("sweetrscc", &do_rscc, sizeof(do_rscc));
+ 	uint32_t ack = 0;
+-	for (int i = 0; i < 200; i++) { ack = rd(g, GMU_RSCC_CONTROL_ACK); if (ack == 2) { break; } IODelay(100); }
+-	wr(g, GMU_RSCC_CONTROL_REQ, 0);
+-	printf("SWEET GPU: G4d-c rscc_control_ack=0x%08x\n", ack);
++	if (do_rscc) {
++		wr(g, GMU_RSCC_CONTROL_REQ, 2);
++		for (int i = 0; i < 200; i++) { ack = rd(g, GMU_RSCC_CONTROL_ACK); if (ack == 2) { break; } IODelay(100); }
++		wr(g, GMU_RSCC_CONTROL_REQ, 0);
++	}
++	printf("SWEET GPU: G4d-c rscc_control_ack=0x%08x (rsc wake %s)\n", ack,
++	    do_rscc ? "done" : "SKIPPED via sweetrscc=0");
+ 
+ 	/* full register config INCLUDING HFI/log, core still in reset (HakiOS step_gmu_start order) */
+ 	wr(g, GMU_CX_FALNEXT_INTF, 1);
+@@ -1127,6 +1144,7 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 
+ 	/* release the core and wait for the firmware to start */
+ 	printf("SWEET GPU: G4d-c releasing the core (HFI configured); chasing 0xbabeface + HFI status\n");
++	wr(g, GMU_CX_GMU_WFI_CONFIG, 0u);   /* KGSL: disable GMU WFI before release */
+ 	wr(g, GMU_CM3_SYSRESET, 0);
+ 	uint32_t r = 0;
+ 	for (int i = 0; i < 5000; i++) {

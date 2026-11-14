@@ -1,0 +1,61 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index ff9f937..e82542c 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -678,7 +678,11 @@ sweet_gpu_g4d_smmu_probe(void)
+ #define HFI_QUEUE_WORDS      1024u
+ 
+ struct hfi_queue {
+-	uint32_t status, start, type, words, message_words, unused[5], read, write;
++	uint32_t status, start, type, words, message_words;
++	/* mainline a6xx_hfi_queue_header names these, and a6xx_hfi_queue_init sets the
++	 * watermarks/requests to 1,1,1,0. We left them zero as "unused[5]". */
++	uint32_t dropped, rx_watermark, tx_watermark, rx_request, tx_request;
++	uint32_t read, write;
+ };
+ struct hfi_table {
+ 	uint32_t version, words, first_queue, queue_words, queues, active_queues;
+@@ -1010,18 +1014,38 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	/* lay the HFI table + 3 queue descriptors in the mapped HFI region (kernel VA, flushed) */
+ 	vm_offset_t hfi_kva = buffers + (vm_offset_t)GMU_HFI_PAGE0 * SMMU_GRANULE;
+ 	volatile struct hfi_table *hfi = (volatile struct hfi_table *)hfi_kva;
+-	static const uint8_t prio[HFI_QUEUES] = { 10, 10, 40 };
+-	hfi->words = (uint32_t)sizeof(struct hfi_table) / 4u;
+-	hfi->first_queue = 6;
++	hfi->version = 0u;
++	/* mainline a6xx_hfi_init: table->size is sizeof(the 6-dword HEADER), NOT the whole
++	 * struct. We were passing sizeof(struct hfi_table)/4 == 210 because the struct
++	 * carries queue[17] inline, so the firmware was told the table is 210 dwords when
++	 * it is 6 + 3*12 = 42. That is the most likely reason HFI_CTRL_INIT=1 parks
++	 * CTRL_STATUS at 0xfe before we send any message at all. */
++	hfi->words = 6u;
++	hfi->first_queue = 6u;
+ 	hfi->queue_words = (uint32_t)sizeof(struct hfi_queue) / 4u;
+ 	hfi->queues = hfi->active_queues = HFI_QUEUES;
+ 	for (uint32_t i = 0; i < HFI_QUEUES; i++) {
+-		hfi->queue[i].status = 1;
++		hfi->queue[i].status = 1u;
+ 		hfi->queue[i].start = GMU_IOVA_HFI + HFI_QUEUE_AT(i);
+-		hfi->queue[i].type = i | ((uint32_t)prio[i] << 8);
++		/* a6xx_hfi_queue_init: header->type = 10 << 8 | id, for EVERY queue. Our
++		 * prio[] gave the debug queue 40, which is not a value mainline ever writes. */
++		hfi->queue[i].type = i | (10u << 8);
+ 		hfi->queue[i].words = HFI_QUEUE_WORDS;
++		hfi->queue[i].message_words = 0u;
++		hfi->queue[i].dropped = 0u;
++		hfi->queue[i].rx_watermark = 1u;
++		hfi->queue[i].tx_watermark = 1u;
++		hfi->queue[i].rx_request = 1u;
++		hfi->queue[i].tx_request = 0u;
++		hfi->queue[i].read = 0u;
++		hfi->queue[i].write = 0u;
+ 	}
+ 	to_memory(hfi_kva, (vm_size_t)(GMU_MAP_PAGES - GMU_HFI_PAGE0) * SMMU_GRANULE);
++	printf("SWEET GPU: G4d-c HFI hdr: version=%u words=%u first_queue=%u queue_words=%u queues=%u/%u;"
++	    " q0 type=0x%x words=%u rxwm=%u txwm=%u rxreq=%u\n",
++	    hfi->version, hfi->words, hfi->first_queue, hfi->queue_words, hfi->active_queues, hfi->queues,
++	    hfi->queue[0].type, hfi->queue[0].words, hfi->queue[0].rx_watermark,
++	    hfi->queue[0].tx_watermark, hfi->queue[0].rx_request);
+ 	printf("SWEET GPU: G4d-c HFI table @ iova 0x%08x: %u queues (q0=0x%08x q1=0x%08x q2=0x%08x)\n",
+ 	    GMU_IOVA_HFI, HFI_QUEUES, GMU_IOVA_HFI + HFI_QUEUE_AT(0), GMU_IOVA_HFI + HFI_QUEUE_AT(1),
+ 	    GMU_IOVA_HFI + HFI_QUEUE_AT(2));

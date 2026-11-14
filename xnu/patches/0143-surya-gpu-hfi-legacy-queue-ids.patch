@@ -1,0 +1,41 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 96786e9..a5e92ec 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1082,11 +1082,32 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	hfi->queue_words = hfi_qhdr_words;
+ 	hfi->queues = hfi->active_queues = HFI_QUEUES;
+ 	for (uint32_t i = 0; i < HFI_QUEUES; i++) {
+-		hfi->queue[i].status = 1u;
+ 		hfi->queue[i].start = GMU_IOVA_HFI + HFI_QUEUE_AT(i);
+-		/* a6xx_hfi_queue_init: header->type = 10 << 8 | id, for EVERY queue. Our
+-		 * prio[] gave the debug queue 40, which is not a value mainline ever writes. */
+-		hfi->queue[i].type = i | (10u << 8);
++		/*
++		 * THE LEGACY QUEUE IDS ARE NOT 0,1,2,3. Both working ports agree, and patch
++		 * 0135 broke this: it replaced a prio[] table (which gave the debug queue 40)
++		 * with a uniform `i | (10 << 8)`, on the reasoning that mainline never writes
++		 * 40. Mainline a6xx_hfi_queue_init is the NON-legacy path; this firmware is
++		 * HFI v1 / legacy, where the queue ids are sparse:
++		 *   mxtpasontop/ios-sweet (a618, fw 1.17): {0,10,1} {4,10,1} {5,40,1} {1,20,0}
++		 *     = CMD, MSG (HFI_MSG_IDX_LEGACY), DBG (HFI_DBG_IDX_LEGACY), DSP0 DISABLED
++		 *   edi194/ios-fajita (a630, fw 1.7): num_queues 2, type (10<<8) | (i ? 4 : 0),
++		 *     commented "4: a630's legacy response queue"
++		 * So the RESPONSE queue is id 4, not 1. We were labelling queue 1 as id 1, which
++		 * is the DSP queue - and that one must be DISABLED (status 0), not enabled.
++		 * The GMU therefore had no MSG queue to find, which is a firmware-visible
++		 * protocol error and exactly the kind of thing answered with a rejection code.
++		 * Our firmware is 1.8 (DTCM word 0 = 0x10080000), one minor above fajita's 1.7
++		 * and nine below mxt's 1.17, and the two agree on id 4, so take the legacy ids.
++		 */
++		static const struct { uint32_t idx, pri, status; } hfi_q[4] = {
++			{ 0u, 10u, 1u },   /* CMD */
++			{ 4u, 10u, 1u },   /* MSG, HFI_MSG_IDX_LEGACY */
++			{ 5u, 40u, 1u },   /* DBG, HFI_DBG_IDX_LEGACY */
++			{ 1u, 20u, 0u },   /* DSP 0, HFI_DSP_IDX_0_LEGACY, disabled */
++		};
++		hfi->queue[i].status = hfi_q[i].status;
++		hfi->queue[i].type = hfi_q[i].idx | (hfi_q[i].pri << 8);
+ 		hfi->queue[i].words = HFI_QUEUE_WORDS;
+ 		hfi->queue[i].message_words = 0u;
+ 		hfi->queue[i].dropped = 0u;

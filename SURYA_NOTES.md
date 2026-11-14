@@ -2192,3 +2192,41 @@ The one question left that does not require guessing. The image is flat: ITCM (1
   boot vector. Nothing we hand it matters.
 - ITCM differing at all would mean the load address or image layout is wrong (it is code; it should
   not change).
+
+### 0142 RESULT (2026-11-14): THE FIRMWARE IS EXECUTING, and it is version 1.8
+  G4d-m TCM vs loaded image: ITCM 24/4096 dwords differ, DTCM 109/4096 differ, first diff at word 130
+  G4d-m DTCM CHANGED => firmware IS executing (it wrote its own RAM)
+  G4d-m dtcm[0] live 10080000 00003d69 00000000 0004122c | image 10080000 00003d69 00000000 00000000
+So the GMU boots, RUNS, writes its own stacks/variables, and DELIBERATELY rejects CTRL_INIT. Not
+wedged. The clock/retention/boot-vector branch is closed (and our GMU clock is identical to mxt's
+anyway: GMU_RCG_CFG_200MHZ (6<<8)|2 == our GMU_CFG_200MHZ 0x602, same reg 0x1124, same UPDATE poll).
+
+THE FIRMWARE VERSION LIVES AT DTCM WORD 0, NOT DTCM+0xff8. Our GMU_DTCM_VERSIONS read (and every
+"DTCM versions" line in this log) has been pointing at the wrong place all session; KGSL's +0xFF8 must
+be a later GMU generation. Versions at image offset 0x4000:
+  vendor a618_gmu.bin      0x10080000 = 1.8   <- what we run; newest on this device
+  vendor a630_gmu.bin      0x10070000 = 1.7   <- matches fajita's reported 1.7
+  linux-firmware a630      0x10060000 = 1.6
+1.17 is NOT obtainable from surya - that is mxt's device (newer vendor image). We already run the best
+blob this phone has.
+
+### REFERENCE PORT CORRECTION: use fajita (fw 1.7), not mxt (fw 1.17)
+We are fw 1.8. fajita is a WORKING port on 1.7, one minor below us; mxt is 1.17, nine above. This
+session matched mxt register-for-register when fajita is far closer to our firmware. Check fajita
+FIRST from now on.
+
+### Patch 0143: the legacy HFI queue IDs are sparse - 0135 broke them
+Both working ports agree and we match neither:
+  mxt (a618, 1.17): {0,10,1} {4,10,1} {5,40,1} {1,20,0}
+                    = CMD, MSG (HFI_MSG_IDX_LEGACY), DBG (HFI_DBG_IDX_LEGACY), DSP0 DISABLED
+                    -> types 0xa00, 0xa04, 0x2805, 0x1401
+  fajita (a630, 1.7): num_queues 2, type = (10<<8) | (i ? 4 : 0), commented
+                    "4: a630's legacy response queue"
+  OURS (0135):      type = i | (10u << 8) -> 0xa00, 0xa01, 0xa02, 0xa03, ALL status 1
+THE RESPONSE QUEUE IS ID 4, NOT 1. We labelled queue 1 as id 1, which is the DSP queue, and that one
+must be DISABLED (status 0). So the GMU had no MSG queue to find - a firmware-visible protocol error,
+which is exactly what gets answered with a rejection code rather than a hang.
+0135 did this damage deliberately: its own comment reads "Our prio[] gave the debug queue 40, which is
+not a value mainline ever writes" - it replaced a CORRECT prio table with a uniform value, reasoning
+from mainline's NON-legacy a6xx_hfi_queue_init. This firmware is HFI v1 / legacy. 40 for DBG is right.
+Queue body offsets are fine: mxt HFI_QUEUE_OFF(i) == 0xe0 + 0x1000*i == our HFI_QUEUE_AT(n).

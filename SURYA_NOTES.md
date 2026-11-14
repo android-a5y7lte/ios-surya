@@ -2015,3 +2015,51 @@ odd one out, and 0x1040xx000 is exactly where kernel allocations live.
 NEXT: confirm whether sweetgpu=17 panics too (if yes, 0130 is innocent and this is a 0114-era bug).
 Fix is to stop double-mapping: either ml_io_unmap before returning, or drop hfi_unc entirely and use
 hfi_kva with explicit dc civac maintenance (patch 0128 already has sweet_dcache_clean_poc).
+
+### Vendor GPU firmware retrieved (2026-11-14)
+The `vendor` logical partition inside `super` is mapped as `/dev/block/dm-1` in recovery, but only in
+some boot states - one survey showed no `/dev/block/mapper/` at all, a later one showed
+`system -> dm-0`, `vendor -> dm-1`. No `lptools`/`lpdump`/`dmctl` on the device; when the nodes are
+present, `mount -o ro /dev/block/dm-1 /mnt/vendor` is all that is needed (no LP metadata parsing).
+Pulled to `research/fw/vendor/` (kept out of git, per AGENTS.md): `a618_gmu.bin` `a630_gmu.bin`
+`a630_sqe.fw` `a615_zap.{mdt,b00,b01,b02,elf}`.
+
+THREE DISTINCT GMU BLOBS - every boot up to tonight used the one the phone never ships:
+  da8d9b1b  linux-firmware a630_gmu.bin  <- what research/fw/a630_gmu.bin was
+  b07f9029  VENDOR a630_gmu.bin          <- different file from linux-firmware's
+  620c483d  VENDOR a618_gmu.bin          <- correct blob for this silicon
+`a615_zap.mdt` == `a615_zap.b00` + `a615_zap.b01` (verified with cmp), so the metadata blob for
+PAS_INIT_IMAGE needs no hand assembly at all - hand the `.mdt` through as a payload blob and delete
+the sha256 construction from patch 0127. The 6860-vs-6684 size gap against our TZ-B.2 build is NOT a
+bug in our assembly: ELF hdr+phdrs is 148 bytes (== b00) either way, the rest is just a630's hash
+segment differing from a615's. Our construction logic was right, the input firmware was wrong.
+
+### FIXED (candidate): HFI queue-table size, patch 0138
+Booting the a618 blob did NOT clear `HFI_CTRL_STATUS = 0xfe`, but it surfaced a new line:
+`GMU firmware FAULTED (CM3_FAULT bit 23) processing our message`. That pointed at the table header.
+`table->size` (dword 1, our `hfi->words`) is the size of the WHOLE queue table in dwords: the 6-dword
+header PLUS every queue header. mxt writes `HFI_QTBL_HDR_DW + HFI_QUEUES * HFI_QHDR_DW` = 6 + 4*12 = 54.
+Patch 0135 replaced the old (wrong) 210 with 6 - the bare header - while its own comment spelled out
+"it is 6 + 3*12 = 42". Comment and code contradicted each other for three patches.
+Declaring the table to end before its first queue header explains BOTH symptoms: CTRL_INIT finds no
+queue to validate (parks at 0xfe) and the doorbell makes the firmware walk a queue header outside the
+declared table (CM3_FAULT).
+
+LEADS KILLED TONIGHT, do not reopen:
+- `G4b firmware versions (from DTCM) core=0 power=0 hfi=0` is EXPECTED and means nothing. The version
+  words are populated by the firmware at RUNTIME; G4b reads them with the core still in reset. Both
+  vendor blobs are zero-filled at 0x7FE0 and 0x3FE0. The images are flat Thumb code (offset 0x08 is
+  `f380 8808` = MSR MSP, r0; 0xe000ed08 = the M3's VTOR at 0x2c), NOT `{addr,size,type,value}` block
+  tables, so the flat ITCM->DTCM load is correct.
+- Register map is NOT the problem. Ours are GMU-base dword offsets, mxt's are GPU-base: add 0x1a800
+  (0x6a000/4) and they are identical. ITCM 0x0c00->0x1b400, DTCM 0x1c00->0x1c400,
+  HFI_CTRL_STATUS 0x5180->0x1f980, AHB_FENCE_RANGE_0 0x9311->0x23b11. All verified equal.
+- `HFI_QTBL_ADDR`/`QTBL_INFO` ARE written, before `CM3_SYSRESET=0`, at the right IOVA (0x60100000).
+- Early RPMh/PDC sequencer init DOES run at sweetgpu>=8 (log lines "G4d-j EARLY FULL a618 RPMH init").
+  RSC/PDC microcode, match values and TCS banks all match mxt. RPMh ordering is not the bug.
+
+METHOD LESSON (cost most of this session): grepping for a symbol NAME across the wrong file, or under
+a name the other tree does not use, produced three confident wrong conclusions in a row
+(`sweet_gpu.c` vs our `iokit/Kernel/arm/SweetGPU.cpp`; `rpmh_ucode` vs our `gmu_full_rpmh_init`).
+Read the code. Also: a too-narrow log grep hid the RPMH lines entirely - `gmu|hfi|cm3|sptprac` does
+not match "G4d-j EARLY FULL a618 RPMH init".

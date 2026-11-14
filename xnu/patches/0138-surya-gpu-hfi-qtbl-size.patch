@@ -1,0 +1,32 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index f346768..409062c 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1057,14 +1057,20 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	vm_offset_t hfi_kva = buffers + (vm_offset_t)GMU_HFI_PAGE0 * SMMU_GRANULE;
+ 	volatile struct hfi_table *hfi = (volatile struct hfi_table *)hfi_kva;
+ 	hfi->version = 0u;
+-	/* mainline a6xx_hfi_init: table->size is sizeof(the 6-dword HEADER), NOT the whole
+-	 * struct. We were passing sizeof(struct hfi_table)/4 == 210 because the struct
+-	 * carries queue[17] inline, so the firmware was told the table is 210 dwords when
+-	 * it is 6 + 3*12 = 42. That is the most likely reason HFI_CTRL_INIT=1 parks
+-	 * CTRL_STATUS at 0xfe before we send any message at all. */
+-	hfi->words = 6u;
++	/* mainline a6xx_hfi_init: table->size is the size of the WHOLE queue table in
++	 * dwords - the 6-dword header PLUS every queue header (HFI_QUEUES * 12) - not the
++	 * header on its own. Patch 0135 rightly dropped the old sizeof(struct hfi_table)/4
++	 * == 210 (the struct carries queue[17] inline) but then wrote the bare header size
++	 * 6 instead of 6 + 4*12 == 54, even though its own comment spelled the formula out.
++	 * Telling the firmware the table ends before its first queue header explains both
++	 * symptoms exactly: HFI_CTRL_INIT=1 finds no queue to validate and parks
++	 * CTRL_STATUS at 0xfe, and ringing the doorbell makes the firmware walk a queue
++	 * header outside the declared table, which trips CM3_FAULT (bit 23).
++	 * mxtpasontop/ios-sweet writes HFI_QTBL_HDR_DW + HFI_QUEUES * HFI_QHDR_DW here. */
++	const uint32_t hfi_qhdr_words = (uint32_t)sizeof(struct hfi_queue) / 4u;
++	hfi->words = 6u + HFI_QUEUES * hfi_qhdr_words;
+ 	hfi->first_queue = 6u;
+-	hfi->queue_words = (uint32_t)sizeof(struct hfi_queue) / 4u;
++	hfi->queue_words = hfi_qhdr_words;
+ 	hfi->queues = hfi->active_queues = HFI_QUEUES;
+ 	for (uint32_t i = 0; i < HFI_QUEUES; i++) {
+ 		hfi->queue[i].status = 1u;

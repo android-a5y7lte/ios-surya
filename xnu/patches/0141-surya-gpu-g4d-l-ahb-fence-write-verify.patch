@@ -1,0 +1,64 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 61f36ed..260623a 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -170,6 +170,9 @@ OSDefineMetaClassAndStructors(SweetGPU, IOService);
+ #define GMU_GMU2HOST_INTR_INFO          GMU_WORD(0x5192u)
+ #define GMU_RSCC_CONTROL_REQ            GMU_WORD(0x9307u)
+ #define GMU_AHB_FENCE_RANGE_0           GMU_WORD(0x9311u)
++/* mxt GMU_REG(0x23b10)/(0x23b12); our base is 0x1a800 dwords lower */
++#define GMU_AO_AHB_FENCE_CTRL           GMU_WORD(0x9310u) /* non-zero = fence CLOSED, writes dropped */
++#define GMU_AHB_FENCE_RANGE_1           GMU_WORD(0x9312u)
+ #define GMU_CHIP                        0x06018000u /* dt chipid 0x06010800 (a618), the way the fw wants it */
+ #define GMU_STARTED_MASK                0x1ffu
+ #define GMU_STARTED                     0x100u
+@@ -1132,6 +1135,31 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	printf("SWEET GPU: G4d-c rscc_control_ack=0x%08x (rsc wake %s)\n", ack,
+ 	    do_rscc ? "done" : "SKIPPED via sweetrscc=0");
+ 
++	/*
++	 * G4d-l: the GMU's AHB fence, which we have never read or written in 40 patches.
++	 * A non-zero AO_AHB_FENCE_CTRL means the fence is CLOSED and register writes to the
++	 * GMU are silently DROPPED (mxtpasontop selects ALLOW before touching core
++	 * registers: "Do not issue more core reads if the firmware closed its AHB access").
++	 * 0140 found cm3_cfg reading 0x52 after we wrote 0x4052, which is what a dropped
++	 * write looks like - so verify the fence, then verify that the config actually
++	 * sticks. If QTBL_ADDR reads back 0, the firmware never had a queue table and every
++	 * host-side fix from 0133 on was correcting a table the GMU could not see.
++	 */
++	uint32_t fence0 = rd(g, GMU_AO_AHB_FENCE_CTRL);
++	printf("SWEET GPU: G4d-l AHB fence BEFORE ctrl=0x%08x range0=0x%08x range1=0x%08x status=0x%08x\n",
++	    fence0, rd(g, GMU_AHB_FENCE_RANGE_0), rd(g, GMU_AHB_FENCE_RANGE_1),
++	    rd(g, GMU_AHB_FENCE_STATUS));
++	if (fence0 != 0u) {
++		wr(g, GMU_AO_AHB_FENCE_CTRL, 0u);
++		uint32_t f = 0;
++		for (int i = 0; i < 100; i++) {
++			f = rd(g, GMU_AO_AHB_FENCE_CTRL);
++			if (f == 0u) { break; }
++			IODelay(10);
++		}
++		printf("SWEET GPU: G4d-l AHB fence was CLOSED, selected ALLOW -> ctrl=0x%08x (0 = allow)\n", f);
++	}
++
+ 	/* full register config INCLUDING HFI/log, core still in reset (HakiOS step_gmu_start order) */
+ 	wr(g, GMU_CX_FALNEXT_INTF, 1);
+ 	wr(g, GMU_CX_FAL_INTF, 1);
+@@ -1154,6 +1182,17 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	wr(g, GMU_RPMH_CTRL, rd(g, GMU_RPMH_CTRL) | GMU_RPMH_CTRL_ALL);
+ 	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
+ 
++	/* G4d-l: did the config actually stick? Read back the registers that decide whether
++	 * the firmware can find its queue table and boot from TCM. Any mismatch here means
++	 * the writes are being dropped and the host-side table was never the problem. */
++	printf("SWEET GPU: G4d-l config readback qtbl_addr=0x%08x (want 0x%08x) qtbl_info=0x%08x (want 1) boot_config=0x%08x (want 2)\n",
++	    rd(g, GMU_HFI_QTBL_ADDR), GMU_IOVA_HFI, rd(g, GMU_HFI_QTBL_INFO), rd(g, GMU_CM3_BOOT_CONFIG));
++	printf("SWEET GPU: G4d-l config readback cm3_cfg=0x%08x (want 0x4052) general_7=0x%08x (want 1) sfr_addr=0x%08x (want 0x%08x)\n",
++	    rd(g, GMU_CM3_CFG), rd(g, GMU_GENERAL_7), rd(g, GMU_HFI_SFR_ADDR), GMU_CHIP);
++	printf("SWEET GPU: G4d-l config readback cp_msg=0x%08x (want 0x%08x) fence_ctrl=0x%08x fence_status=0x%08x rpmh_ctrl=0x%08x\n",
++	    rd(g, GMU_PWR_COL_CP_MSG), GMU_IOVA_LOG | GMU_LOG_PAGES_M1, rd(g, GMU_AO_AHB_FENCE_CTRL),
++	    rd(g, GMU_AHB_FENCE_STATUS), rd(g, GMU_RPMH_CTRL));
++
+ 	/* release the core and wait for the firmware to start */
+ 	printf("SWEET GPU: G4d-c releasing the core (HFI configured); chasing 0xbabeface + HFI status\n");
+ 	wr(g, GMU_CX_GMU_WFI_CONFIG, 0u);   /* KGSL: disable GMU WFI before release */

@@ -2121,3 +2121,37 @@ No behaviour change. After the failed CTRL_INIT, dump:
    and have never once read back. Non-zero content there is the firmware telling us what it is doing.
 Run at sweetgpu=10 (stage 1): mxt's HFI came up at their equivalent of that, and stage 1 is confirmed
 to reproduce 0xfe here with no GX rail, no SPTPRAC and no fault.
+
+### 0140 RESULT (2026-11-14): THE FIRMWARE DOES NOTHING. 0xfe is a symptom.
+sweetgpu=10. After CM3_SYSRESET=0 the firmware writes 0xbabeface to CM3_FW_INIT_RESULT and then
+performs NO observable work whatsoever:
+  G4d-k DTCM versions POST-BOOT core=0x00000000 pwr=0x00000000 hfi=0x00000000
+  G4d-k GMU log @ iova 0x60300000: 0 of 1024 dwords non-zero
+  G4d-k q0..q3 status=1 start=0x60100?e0 type=0xa0? words=1024 rd=0 wr=0   <- exactly as WE wrote them
+  G4d-k fence_status=0x00000000 rpmh_power_state=0x0000000f cm3_cfg=0x00000052 intr_info=0x00000000
+The DTCM version words need NO bus access at all (internal TCM) and they are zero, so the firmware
+stalls before doing any work of its own, not merely before reaching external memory. The GMU never
+touched a queue header and never wrote one dword of its own log.
+=> THE HOST-SIDE TABLE/REGISTER CONFIGURATION WAS NEVER THE FAULT. That is why six correct fixes
+(0133/0135/0136/0137/0138/0139) each changed nothing. Stop looking at the HFI table.
+
+ANOMALY THAT POINTS SOMEWHERE NEW: `cm3_cfg=0x00000052`, but the pre-reset block writes 0x4052, and
+G4a reads 0x52 before any write. Bit 14 never stuck. Either it is read-only, or THE WRITE WAS DROPPED.
+
+### Patch 0141: the AHB fence, and whether our writes stick at all (G4d-l, diagnostics)
+In 40 patches we have never read or written GMU_AO_AHB_FENCE_CTRL (mxt GMU_REG(0x23b10), our
+GMU_WORD(0x9310) - we define RANGE_0 0x9311 and STATUS 0x9313 but not CTRL 0x9310). A NON-ZERO
+FENCE_CTRL means the fence is CLOSED and register writes to the GMU are SILENTLY DROPPED;
+mxtpasontop selects ALLOW before touching core registers ("Do not issue more core reads if the
+firmware closed its AHB access"). A closed fence would explain cm3_cfg, and if the pre-reset config
+was dropped then the firmware booted with no queue table, no boot config and no log pointer - which
+is exactly a firmware that writes its alive marker and then sits there.
+0141 adds, with no behaviour change beyond selecting ALLOW as mxt does:
+- fence ctrl/range0/range1/status BEFORE the config, and ALLOW + poll if ctrl is non-zero
+- a readback of every register that decides whether the firmware can work: HFI_QTBL_ADDR (want
+  0x60100000), QTBL_INFO (1), CM3_BOOT_CONFIG (2), CM3_CFG (0x4052), GENERAL_7 (1), HFI_SFR_ADDR
+  (0x06018000), PWR_COL_CP_MSG (0x60300000), plus fence ctrl/status and RPMH_CTRL.
+READ: if QTBL_ADDR reads back 0 the firmware never had a table and every host-side patch from 0133
+on was correcting something the GMU could not see. If everything reads back correctly AND the fence
+is already open, then the firmware has its full configuration and still does nothing, and the fault
+is in what the GMU core itself needs to run - clocks, TCM retention, or the image load address.

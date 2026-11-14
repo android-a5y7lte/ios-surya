@@ -2063,3 +2063,34 @@ a name the other tree does not use, produced three confident wrong conclusions i
 (`sweet_gpu.c` vs our `iokit/Kernel/arm/SweetGPU.cpp`; `rpmh_ucode` vs our `gmu_full_rpmh_init`).
 Read the code. Also: a too-narrow log grep hid the RPMH lines entirely - `gmu|hfi|cm3|sptprac` does
 not match "G4d-j EARLY FULL a618 RPMH init".
+
+### 0138 RESULT: words=54 confirmed, HFI still 0xfe (2026-11-14)
+Log reads `HFI hdr: version=0 words=54 first_queue=6 queue_words=12 queues=4/4` - the fix took - but
+`hfi_ctrl_status=0x000000fe` and CM3_FAULT on GMU_INIT are unchanged. 0138 corrected a real bug (KGSL
+`tbl->qtbl_hdr.size = sizeof(struct hfi_queue_table) >> 2` == header + all queue headers == 54) but it
+was not the blocker. Keep it.
+
+### KEY: mxt's HFI came up at sweetgpu=4, with NO GX rail and NO SPTPRAC
+NOTES.md line 107 (their patch 0085, CI 39158876834): "GMU booted (51 us). HFI works: HFI_CTRL_STATUS 1,
+HFI_VERSION_INFO 0 (v1). H2F_MSG_INIT ACK 0x0002047e ... GMU firmware 0x10110000 = 1.17".
+Consequences, all verified against their source:
+- `hfi_version=0` is NORMAL (v1). Never a symptom; stop reading it as one.
+- HFI needs NO GX rail, NO SPTPRAC, NO full RPMh/PDC init. Confirmed on device: sweetgpu=10 (stage 1,
+  none of those) gives the same 0xfe, no fault. So patch 0130's GX-rail-before-HFI is NEUTRAL, not a
+  fix and not the cause. Stages 8/9 were solving a problem that does not exist.
+- Their CBAR_S1_BYPASS_S2 == 0x1f300 and our cbar reads 0x0001f300; their SMRs are 0x80000005 /
+  0x80000004 mask 0 and ours match exactly. SMMU stream matching is NOT the difference.
+
+### Patch 0139: GMU belongs on SMMU context bank 0, not 1
+Last verified difference from the working port. Theirs: `GMU_CB 0`, `GMU_ASID (GMU_CB+1) == 1`,
+`CP_CB 1`, `CP_ASID 2` - GMU on bank 0, 3D core on bank 1. Ours had `GMU_CTX 1u` with the comment
+"0 kept for the 3D core", i.e. the two banks swapped, AND derived the ASID from the bank index, so we
+ran CB1/ASID1 - their bank for the CP with the GMU's ASID. 0139 sets GMU_CTX=0 and adds a separate
+GMU_ASID=GMU_CTX+1, used for TTBR0[63:48] and TLBIASID. Leaves bank 1 free for the CP, as theirs does.
+Their S2CR reads 0x300 (TRANS_CB(0)); ours read 0x301. CB0 is confirmed free on our device
+(`cb[0] cbar=0 sctlr=0 M=0 ttbr0=0`).
+
+If 0139 does not move CTRL_STATUS off 0xfe, STOP patching and instrument: mxt prints
+`gpu_gmu_state("before start")` immediately before `CM3_SYSRESET=0`; add the same dump to ours and
+diff the two register states side by side. Five straight "this looks like the fix" patches
+(0133/0135/0136/0137/0138) all left 0xfe untouched.

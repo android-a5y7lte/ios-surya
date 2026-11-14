@@ -1,0 +1,37 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 409062c..2caaefc 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -650,7 +650,13 @@ sweet_gpu_g4d_smmu_probe(void)
+ #define PTE_NOT_GLOBAL      (1ull << 11)
+ #define PTE_GMU             (PTE_SHARED | PTE_ACCESSED | PTE_NOT_GLOBAL) /* GMU accesses: privileged, uncached */
+ /* the GMU's view (mainline a6xx_gmu) */
+-#define GMU_CTX             1u          /* SMMU context bank for the GMU (0 kept for the 3D core) */
++/* mxtpasontop/ios-sweet, the working a618/SM7150 port, puts the GMU on context bank 0
++ * (GMU_CB 0, GMU_ASID GMU_CB+1 == 1) and the 3D core on bank 1 (CP_CB 1, CP_ASID 2); its
++ * notes record HFI_CTRL_STATUS 1 with exactly that. We had the two banks the other way
++ * round, which left CB1/ASID1 - matching neither their bank nor their ASID, because we
++ * derived the ASID from the bank index. Bank 0 for the GMU, bank 1 free for the CP. */
++#define GMU_CTX             0u          /* SMMU context bank for the GMU (1 left for the 3D core) */
++#define GMU_ASID            (GMU_CTX + 1u)  /* arm_smmu_init_asid: not the bank index */
+ #define GMU_SMMU_STREAM     5u          /* surya mainline dt: gmu iommus = <&adreno_smmu 5> */
+ #define GMU_SMMU_MASK       0x0u        /* adreno_smmu #iommu-cells=1 => no mask cell, exact SID match
+                                          * (HakiOS's 0x400 is SM7325's 2-cell binding; writing an
+@@ -810,7 +816,7 @@ gmu_build_context(vm_offset_t *buffers_out)
+ 	to_memory(tables, PAGE_SIZE);
+ 	to_memory(buffers, round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE));
+ 
+-	uint64_t ttbr0 = kvtophys((vm_offset_t)l1) | ((uint64_t)GMU_CTX << 48);
++	uint64_t ttbr0 = kvtophys((vm_offset_t)l1) | ((uint64_t)GMU_ASID << 48);
+ 	printf("SWEET GPU: G4d-ctx tables@phys 0x%llx buffers@phys 0x%llx ttbr0=0x%llx iova 0x%08x..0x%08x\n",
+ 	    (uint64_t)kvtophys((vm_offset_t)l1), (uint64_t)kvtophys(buffers), ttbr0,
+ 	    GMU_IOVA_DUMMY, GMU_IOVA_LOG + 0xfffu);
+@@ -828,7 +834,7 @@ gmu_build_context(vm_offset_t *buffers_out)
+ 	smmu_wr(cb, SMMU_CB_MAIR0, SMMU_MAIR0_CFG);
+ 	smmu_wr(cb, SMMU_CB_MAIR1, 0);
+ 	smmu_wr(cb, SMMU_CB_FSR, SMMU_FSR_FAULTS);
+-	smmu_wr(cb, SMMU_CB_TLBIASID, GMU_CTX);
++	smmu_wr(cb, SMMU_CB_TLBIASID, GMU_ASID);
+ 	smmu_wr(cb, SMMU_CB_TLBSYNC, 1);
+ 	uint32_t tlb = 0;
+ 	for (int i = 0; i < 500; i++) { tlb = smmu_rd(cb, SMMU_CB_TLBSTATUS); if ((tlb & 1u) == 0) { break; } IODelay(10); }

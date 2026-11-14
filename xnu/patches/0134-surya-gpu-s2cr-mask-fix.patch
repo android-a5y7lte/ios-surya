@@ -1,0 +1,20 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 385c879..ff9f937 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -803,8 +803,13 @@ gmu_build_context(vm_offset_t *buffers_out)
+ 	uint32_t fsr   = smmu_rd(cb, SMMU_CB_FSR);
+ 	bool ok = smr == (SMMU_SMR_VALID | (GMU_SMMU_MASK << 16) | GMU_SMMU_STREAM) &&
+ 	    smr2 == (SMMU_SMR_VALID | (GMU_SMMU_MASK << 16) | GMU_SMMU_STREAM2) &&
+-	    (s2cr & 0x300ffu) == (SMMU_S2CR_PRIV | GMU_CTX) &&
+-	    (s2cr2 & 0x300ffu) == (SMMU_S2CR_PRIV | GMU_CTX) && (sctlr & 1u) != 0 &&
++	    /* The mask must cover PRIVCFG (bits 9:8) now that we expect it set. 0x300ff left
++	     * those bits out, so 0x301 & 0x300ff == 0x001 and the compare never matched: on
++	     * the 0133 boot the context bank was programmed EXACTLY right (smr 0x80000005,
++	     * smr2 0x80000004, both s2cr 0x301, sctlr M=1, no fault bits) and we aborted
++	     * anyway with "SMMU context did not come up". Bad assertion, not bad hardware. */
++	    (s2cr & 0x303ffu) == (SMMU_S2CR_PRIV | GMU_CTX) &&
++	    (s2cr2 & 0x303ffu) == (SMMU_S2CR_PRIV | GMU_CTX) && (sctlr & 1u) != 0 &&
+ 	    tlo == (uint32_t)ttbr0 && thi == (uint32_t)(ttbr0 >> 32) &&
+ 	    (cbar & 0x30000u) == (SMMU_CBAR_STAGE1 & 0x30000u);
+ 	/* NB fsr bit 10 (0x400) is the FORMAT field (AArch64), NOT a fault - mxtpasontop's

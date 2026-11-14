@@ -1,0 +1,121 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index e82542c..fc0a512 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -658,12 +658,30 @@ sweet_gpu_g4d_smmu_probe(void)
+                                          * AP=0 (privileged RW, unprivileged none), so without this an
+                                          * unprivileged GMU access takes a permission fault. Both
+                                          * 0085 (S2CR 0x300) and fajita ((3<<8)|cb) set it. */
+-#define GMU_IOVA_BASE       0x60000000u /* L1=1 L2=0 L3=0; all pages are L3[0..n], same L1/L2 */
+-#define GMU_IOVA_LOG        0x60002000u /* 16K firmware log (pages 2..5) */
+-#define GMU_IOVA_HFI        0x60006000u /* HFI table + 3 queues (pages 6..9, 16K) */
+-#define GMU_LOG_PAGES_M1    3u          /* (16K/4K - 1), as PWR_COL_CP_MSG wants it */
+-#define GMU_HFI_PAGE0       6u          /* index of the first HFI page in the buffer block */
+-#define GMU_MAP_PAGES       10u         /* 2 dummy + 4 log + 4 hfi */
++/* KGSL's GMU allocator hands out ONE 1 MiB SLOT PER BUFFER, in allocation order:
++ * dummy page, HFI, crash dump, log. Both ports that have HFI working on this chip
++ * class use exactly these addresses - mxtpasontop/ios-sweet gpu (SM7150/a618) and
++ * ios-fajita (SDM845/a630) independently. Our old packed 4 KiB layout (log at
++ * 0x60002000, HFI at 0x60006000) is not what the firmware expects, and HFI_CTRL_INIT
++ * parked CTRL_STATUS at 0xfe with a header that was otherwise field-for-field
++ * identical to mainline's. Two 1 MiB slots per 2 MiB L3 table, so the dummy/HFI pair
++ * and the dump/log pair need SEPARATE L3 tables - which is why fajita's recipe lists
++ * "L1/L2/L3A/L3B" rather than a single L3. */
++#define GMU_IOVA_DUMMY      0x60000000u
++#define GMU_IOVA_HFI        0x60100000u
++#define GMU_IOVA_DUMP       0x60200000u
++#define GMU_IOVA_LOG        0x60300000u
++#define GMU_IOVA_BASE       GMU_IOVA_DUMMY
++/* offsets of each buffer inside the one contiguous block we allocate */
++#define GMU_BUF_DUMMY       0x0000u
++#define GMU_BUF_HFI         0x1000u
++#define GMU_BUF_HFI_SZ      0x5000u     /* HFIMEM_SIZE rounded to pages: table + 4 queues */
++#define GMU_BUF_DUMP        0x6000u
++#define GMU_BUF_DUMP_SZ     0x4000u     /* DUMPMEM_SIZE */
++#define GMU_BUF_LOG         0xa000u
++#define GMU_LOG_PAGES_M1    0u          /* one 4 KiB unit, as PWR_COL_CP_MSG wants it */
++#define GMU_HFI_PAGE0       1u          /* GMU_BUF_HFI / SMMU_GRANULE */
++#define GMU_MAP_PAGES       11u         /* 1 dummy + 5 hfi + 4 dump + 1 log */
+ 
+ /* G4d-c HFI (Host-Firmware Interface) - the GMU registers that must be set BEFORE the
+  * core is released from reset, plus the message-queue table laid in the HFI buffer.
+@@ -674,7 +692,8 @@ sweet_gpu_g4d_smmu_probe(void)
+ #define GMU_HFI_QTBL_ADDR    GMU_WORD(0x5185u)  /* the HFI table's iova */
+ #define GMU_HFI_CTRL_INIT    GMU_WORD(0x5186u)
+ #define GMU_HOST2GMU_INTR_SET GMU_WORD(0x5194u)
+-#define HFI_QUEUES           3u          /* 0: host->gmu, 1: gmu->host, 2: gmu debug */
++#define HFI_QUEUES           4u          /* 0: host->gmu, 1: gmu->host, 2: debug, 3: spare.
++                                          * Both working ports use 4; we used 3. */
+ #define HFI_QUEUE_WORDS      1024u
+ 
+ struct hfi_queue {
+@@ -693,7 +712,9 @@ struct hfi_table {
+  * CM3_FAULT bit 23 set when the GMU tried to process the first message with the
+  * compact layout - a618's older firmware very likely insists on page-aligned
+  * queues. Queue n lives on buffer page (GMU_HFI_PAGE0 + 1 + n). */
+-#define HFI_QUEUE_AT(n)     (4096u * (1u + (n)))
++/* ALIGN(sizeof(table with 4 queue headers), 16) + i * 4 KiB = 0xe0 + i*0x1000, so
++ * queue 0's data shares the table's page. Ours put every queue on its own page. */
++#define HFI_QUEUE_AT(n)     (0xe0u + 0x1000u * (n))
+ 
+ /* push CPU writes out to DRAM: the SMMU walks tables and the GMU reads buffers from
+  * memory, not this core's cache. */
+@@ -756,14 +777,26 @@ gmu_build_context(vm_offset_t *buffers_out)
+ 	}
+ 	*buffers_out = buffers;
+ 
+-	uint64_t *l1 = (uint64_t *)(tables + 0x0000u);
+-	uint64_t *l2 = (uint64_t *)(tables + 0x1000u);
+-	uint64_t *l3 = (uint64_t *)(tables + 0x2000u);
+-	l1[(GMU_IOVA_BASE >> 30) & 0x1ffu] = kvtophys((vm_offset_t)l2) | PTE_TABLE;
+-	l2[(GMU_IOVA_BASE >> 21) & 0x1ffu] = kvtophys((vm_offset_t)l3) | PTE_TABLE;
+-	for (uint32_t k = 0; k < GMU_MAP_PAGES; k++) {
+-		uint64_t phys = kvtophys(buffers + (vm_offset_t)k * SMMU_GRANULE);
+-		l3[((GMU_IOVA_BASE >> 12) & 0x1ffu) + k] = phys | PTE_GMU | PTE_PAGE;
++	uint64_t *l1  = (uint64_t *)(tables + 0x0000u);
++	uint64_t *l2  = (uint64_t *)(tables + 0x1000u);
++	uint64_t *l3a = (uint64_t *)(tables + 0x2000u);   /* 0x60000000-0x601fffff */
++	uint64_t *l3b = (uint64_t *)(tables + 0x3000u);   /* 0x60200000-0x603fffff */
++	l1[(GMU_IOVA_DUMMY >> 30) & 0x1ffu] = kvtophys((vm_offset_t)l2)  | PTE_TABLE;
++	l2[(GMU_IOVA_DUMMY >> 21) & 0x1ffu] = kvtophys((vm_offset_t)l3a) | PTE_TABLE;
++	l2[(GMU_IOVA_DUMP  >> 21) & 0x1ffu] = kvtophys((vm_offset_t)l3b) | PTE_TABLE;
++	static const struct { uint32_t iova; uint32_t off; uint32_t size; } gmu_map[] = {
++		{ GMU_IOVA_DUMMY, GMU_BUF_DUMMY, 0x1000u },
++		{ GMU_IOVA_HFI,   GMU_BUF_HFI,   GMU_BUF_HFI_SZ },
++		{ GMU_IOVA_DUMP,  GMU_BUF_DUMP,  GMU_BUF_DUMP_SZ },
++		{ GMU_IOVA_LOG,   GMU_BUF_LOG,   0x1000u },
++	};
++	for (unsigned m = 0; m < sizeof(gmu_map) / sizeof(gmu_map[0]); m++) {
++		uint64_t *l3 = (((gmu_map[m].iova >> 21) & 0x1ffu) ==
++		    ((GMU_IOVA_DUMMY >> 21) & 0x1ffu)) ? l3a : l3b;
++		for (uint32_t k = 0; k < gmu_map[m].size / SMMU_GRANULE; k++) {
++			uint64_t phys = kvtophys(buffers + gmu_map[m].off + (vm_offset_t)k * SMMU_GRANULE);
++			l3[((gmu_map[m].iova >> 12) & 0x1ffu) + k] = phys | PTE_GMU | PTE_PAGE;
++		}
+ 	}
+ 	to_memory(tables, PAGE_SIZE);
+ 	to_memory(buffers, round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE));
+@@ -771,7 +804,7 @@ gmu_build_context(vm_offset_t *buffers_out)
+ 	uint64_t ttbr0 = kvtophys((vm_offset_t)l1) | ((uint64_t)GMU_CTX << 48);
+ 	printf("SWEET GPU: G4d-ctx tables@phys 0x%llx buffers@phys 0x%llx ttbr0=0x%llx iova 0x%08x..0x%08x\n",
+ 	    (uint64_t)kvtophys((vm_offset_t)l1), (uint64_t)kvtophys(buffers), ttbr0,
+-	    GMU_IOVA_BASE, GMU_IOVA_BASE + GMU_MAP_PAGES * SMMU_GRANULE - 1u);
++	    GMU_IOVA_DUMMY, GMU_IOVA_LOG + 0xfffu);
+ 
+ 	/* program context bank 1 (arm-smmu.c order); writes via the hypervisor-safe str */
+ 	smmu_wr(cb, SMMU_CB_SCTLR, 0);
+@@ -1217,10 +1250,10 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	uint32_t seq = 1u;
+ 	uint32_t hdr = send_id | (5u << 8) | (0u << 16) | (seq << 20); /* id|size=5|type=CMD|seq=1 */
+ 	q0_data[w0 + 0u] = hdr;
+-	q0_data[w0 + 1u] = 0u;             /* seg_id / arg0 */
+-	q0_data[w0 + 2u] = 0u;             /* dbg_buf_addr / arg1 */
+-	q0_data[w0 + 3u] = 0u;             /* dbg_buf_size / arg2 */
+-	q0_data[w0 + 4u] = 0u;             /* boot_state=cold / arg3 */
++	q0_data[w0 + 1u] = 0u;                  /* seg_id */
++	q0_data[w0 + 2u] = GMU_IOVA_DUMP;       /* dbg_buffer_addr - was 0, i.e. iova 0 */
++	q0_data[w0 + 3u] = GMU_BUF_DUMP_SZ;     /* dbg_buffer_size - was 0 */
++	q0_data[w0 + 4u] = 1u;                  /* boot_state = GMU_COLD_BOOT (was 0) */
+ 	q0_data[w0 + 5u] = 0xfafafafau;    /* pad to 4-dword slot boundary (HakiOS/vendor) */
+ 	q0_data[w0 + 6u] = 0xfafafafau;
+ 	q0_data[w0 + 7u] = 0xfafafafau;

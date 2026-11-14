@@ -2230,3 +2230,50 @@ which is exactly what gets answered with a rejection code rather than a hang.
 not a value mainline ever writes" - it replaced a CORRECT prio table with a uniform value, reasoning
 from mainline's NON-legacy a6xx_hfi_queue_init. This firmware is HFI v1 / legacy. 40 for DBG is right.
 Queue body offsets are fine: mxt HFI_QUEUE_OFF(i) == 0xe0 + 0x1000*i == our HFI_QUEUE_AT(n).
+
+### REPO SWEEP 2026-11-15: fajita's brg-port is 29 commits ahead, and their GPU COMPOSITES THE UI
+Standing habit from here on: `git ls-remote --heads origin` in each reference clone every cycle, not
+just `git fetch` on the branch we happen to have. The GitHub API is blocked for these repos in this
+session (403, add_repo gated) but the git proxy serves public reads fine, so ls-remote + fetch works.
+Branches we had never looked at:
+- edi194/ios-fajita `brg-port` 67317a3 (2026-11-14, 29 commits past main) - a BERYLLIUM (Poco F1,
+  sdm845) lineage: 0161-beryllium-focaltech-ft8719-touch, ios18-* patches.
+- mxtpasontop/ios-sweet `main` fbf3a9c - older (2026-10-18) and about USB/CDC-ECM, not GPU. Their
+  `gpu` branch has not moved since 2026-10-20 (stuck at 0098, CP ROQ reads 0). mxt is stuck LATER in
+  the ladder than us but is not ahead on HFI.
+fajita main (c8076bc, 2026-11-06) already carries 0146-gpu-zap, 0147-gpu-firstsubmit, 0150-gpu-ib
+-submit .. 0166-gpu-tlb, and brg-port adds "Chlorophyll composites the UI on the Adreno 630"
+(2026-11-10) and the QSEED3 hardware scaler. THEIR WHOLE GPU STACK WORKS, on firmware 1.7.
+
+### THE BIG ONE: fajita DOES NOT PUT THE GMU BEHIND THE SMMU
+NOTES-FAJITA.md, "Where the GMU's memory lives (patch 0110)":
+  HFI_QTBL_ADDR is a 32-bit register and every address the kernel has is above 4 GB (the ADT starts
+  at 0x100000000), so the HFI table and the log go into the low bank ... 0xb0000000 is plain DRAM
+  that XNU never declares. It is mapped with ml_io_map, so the GMU sees the writes without cache
+  maintenance. HFI: table header (6 words) + two queue headers (12 words each) at +0, queues at
+  +0x1000/+0x2000 (a630 legacy: 2 queues, response queue type 4). Log: +0x8000, four pages.
+and 0120 writes `queue[i].iova = GPU_SCRATCH_PA + GPU_SCRATCH_HFI + 0x1000 * (i + 1)` - RAW PHYSICAL
+ADDRESSES. We built an entire GMU SMMU context (0133, 0134, 0139) and hand the firmware IOVAs at
+0x60000000, and WE HAVE NEVER PROVEN THAT CONTEXT TRANSLATES: FSR 0x400 means nothing faulted, which
+is equally consistent with no transaction ever reaching the bank - which is exactly our symptom (GMU
+never reads the table, never writes its log, no fault).
+Viable on surya for the same reason: mkadt.py --highmem gives XNU only the upper bank, so the entire
+low bank is undeclared, and our own survey (NOTES line 197) puts every low carve-out between
+0x85700000 and 0x9f800000+0x1e00000 (ends 0xa1600000). 0xb0000000 is plain untouched DRAM below 4 GB.
+ALSO from their notes, worth checking on surya independently: sdm845 context banks are at
+`qcom,gpu-offset 0x48000`, NOT 0x8000 - "so the earlier CB reads were of nothing". We compute
+cb_base = numpage<<pgshift = 0x8000.
+
+### table->size UNITS: the two working ports DISAGREE
+- mainline a6xx_hfi_init and fajita 0120: BYTES. `table->size = sizeof(*table) + 2*sizeof(*queue)` = 120
+- KGSL and mxt: DWORDS. `sizeof(struct hfi_queue_table) >> 2` = 54 for four queues
+Both ports work, so the firmware tolerates one of them. 0144 stops mixing: bytes on the lowmem
+(fajita) path, dwords on the SMMU (KGSL) path.
+
+### Patch 0144: lowmem HFI, boot-arg sweetlowhfi=1 (A/B on one build)
+GMU_LOWMEM_PA 0xb0000000, table at +0, queue bodies at +0x1000/+0x2000, log at +0x8000, 2 queues
+(types 0xa00 and 0xa04 - which the 0143 legacy-id table already produces for nq=2), size in bytes,
+ml_io_map'd so no cache maintenance, HFI_QTBL_ADDR and PWR_COL_CP_MSG given PHYSICAL addresses.
+sweetlowhfi unset keeps the existing SMMU path exactly, so one kernel tests both:
+  ARGS='sweetgpu=10'                 -> 0143 only (SMMU path, legacy queue ids)
+  ARGS='sweetgpu=10 sweetlowhfi=1'   -> fajita addressing, no SMMU for the GMU

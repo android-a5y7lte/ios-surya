@@ -1,0 +1,177 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index a5e92ec..d792df3 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -689,6 +689,24 @@ sweet_gpu_g4d_smmu_probe(void)
+ #define GMU_IOVA_HFI        0x60100000u
+ #define GMU_IOVA_DUMP       0x60200000u
+ #define GMU_IOVA_LOG        0x60300000u
++/*
++ * edi194/ios-fajita's addressing, which gets an Adreno 630 on GMU firmware 1.7 all the
++ * way to compositing the UI. It does NOT put the GMU's buffers behind the SMMU at all:
++ * HFI_QTBL_ADDR is a 32-bit register and every address XNU has is above 4 GB, so the
++ * table and log go into low DRAM that the kernel never declares, mapped with ml_io_map
++ * (device memory, so the GMU sees the writes with no cache maintenance) and handed to
++ * the firmware as RAW PHYSICAL ADDRESSES.
++ * Viable on surya for the same reason: mkadt.py --highmem gives XNU only the upper bank
++ * (0x100000000 + 0xfcc00000), so the whole low bank is undeclared, and our own survey put
++ * every low carve-out between 0x85700000 and 0x9f800000+0x1e00000 (ends 0xa1600000).
++ * 0xb0000000 is therefore plain untouched DRAM below 4 GB - the same address fajita uses.
++ * Layout (fajita): table at +0, queue bodies at +0x1000 and +0x2000, log at +0x8000.
++ */
++#define GMU_LOWMEM_PA       0xb0000000u
++#define GMU_LOWMEM_HFI      0x0000u
++#define GMU_LOWMEM_LOG      0x8000u
++#define GMU_LOWMEM_SIZE     0x10000u
++#define GMU_LOWMEM_QUEUES   2u          /* a630 legacy: CMD + response (type 4) */
+ #define GMU_IOVA_BASE       GMU_IOVA_DUMMY
+ /* offsets of each buffer inside the one contiguous block we allocate */
+ #define GMU_BUF_DUMMY       0x0000u
+@@ -1065,6 +1083,41 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	/* lay the HFI table + 3 queue descriptors in the mapped HFI region (kernel VA, flushed) */
+ 	vm_offset_t hfi_kva = buffers + (vm_offset_t)GMU_HFI_PAGE0 * SMMU_GRANULE;
+ 	volatile struct hfi_table *hfi = (volatile struct hfi_table *)hfi_kva;
++
++	/*
++	 * G4d-n (sweetlowhfi=1): fajita's addressing instead of ours. We have never been
++	 * able to PROVE the GMU's SMMU context translates - FSR 0x400 means nothing faulted,
++	 * which is equally consistent with no transaction ever reaching this context bank,
++	 * and that is exactly our symptom: the GMU never reads the table, never writes its
++	 * log, and the SMMU records no fault. fajita sidesteps the question entirely by
++	 * putting the table and log in undeclared low DRAM and handing the firmware physical
++	 * addresses, and that port runs an a630 on firmware 1.7 (one minor below ours) all
++	 * the way to compositing the UI. Kept behind a boot-arg so the SMMU path stays
++	 * testable and the two can be compared on one build.
++	 */
++	uint32_t lowhfi = 0;
++	(void)PE_parse_boot_argn("sweetlowhfi", &lowhfi, sizeof(lowhfi));
++	uint32_t gmu_hfi_addr = GMU_IOVA_HFI;
++	uint32_t gmu_log_addr = GMU_IOVA_LOG | GMU_LOG_PAGES_M1;
++	uint32_t nq = HFI_QUEUES;
++	if (lowhfi != 0u) {
++		vm_offset_t low = ml_io_map(GMU_LOWMEM_PA, GMU_LOWMEM_SIZE);
++		if (low == 0) {
++			printf("SWEET GPU: G4d-n could not ml_io_map lowmem 0x%08x - staying on the SMMU path\n",
++			    GMU_LOWMEM_PA);
++			lowhfi = 0u;
++		} else {
++			for (uint32_t o = 0; o < GMU_LOWMEM_SIZE; o += 4u) {
++				*(volatile uint32_t *)(low + o) = 0u;
++			}
++			hfi = (volatile struct hfi_table *)(low + GMU_LOWMEM_HFI);
++			gmu_hfi_addr = GMU_LOWMEM_PA + GMU_LOWMEM_HFI;
++			gmu_log_addr = (GMU_LOWMEM_PA + GMU_LOWMEM_LOG) | GMU_LOG_PAGES_M1;
++			nq = GMU_LOWMEM_QUEUES;
++			printf("SWEET GPU: G4d-n LOWMEM HFI (fajita addressing): table pa=0x%08x kva=0x%llx log pa=0x%08x, %u queues, NO SMMU\n",
++			    gmu_hfi_addr, (uint64_t)low, GMU_LOWMEM_PA + GMU_LOWMEM_LOG, nq);
++		}
++	}
+ 	hfi->version = 0u;
+ 	/* mainline a6xx_hfi_init: table->size is the size of the WHOLE queue table in
+ 	 * dwords - the 6-dword header PLUS every queue header (HFI_QUEUES * 12) - not the
+@@ -1077,12 +1130,23 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	 * header outside the declared table, which trips CM3_FAULT (bit 23).
+ 	 * mxtpasontop/ios-sweet writes HFI_QTBL_HDR_DW + HFI_QUEUES * HFI_QHDR_DW here. */
+ 	const uint32_t hfi_qhdr_words = (uint32_t)sizeof(struct hfi_queue) / 4u;
+-	hfi->words = 6u + HFI_QUEUES * hfi_qhdr_words;
++	/*
++	 * THE TWO WORKING PORTS DISAGREE ON THE UNITS OF table->size, so follow whichever
++	 * one we are imitating. mainline a6xx_hfi_init and fajita write BYTES
++	 * (`table->size = sizeof(*table) + 2 * sizeof(*queue)` == 120); KGSL and mxt write
++	 * DWORDS (`sizeof(struct hfi_queue_table) >> 2` == 54 for four queues). Both ports
++	 * work, so the firmware evidently tolerates one of them, but there is no reason to
++	 * mix: on the lowmem path take fajita's bytes, on the SMMU path keep KGSL's dwords.
++	 */
++	hfi->words = lowhfi ? (6u + nq * hfi_qhdr_words) * 4u : (6u + nq * hfi_qhdr_words);
+ 	hfi->first_queue = 6u;
+ 	hfi->queue_words = hfi_qhdr_words;
+-	hfi->queues = hfi->active_queues = HFI_QUEUES;
+-	for (uint32_t i = 0; i < HFI_QUEUES; i++) {
+-		hfi->queue[i].start = GMU_IOVA_HFI + HFI_QUEUE_AT(i);
++	hfi->queues = hfi->active_queues = nq;
++	for (uint32_t i = 0; i < nq; i++) {
++		/* fajita puts the queue bodies on their own pages (+0x1000 * (i+1)); mxt uses
++		 * 0xe0 + 0x1000*i, which is what HFI_QUEUE_AT already encodes. */
++		hfi->queue[i].start = lowhfi ? (gmu_hfi_addr + 0x1000u * (i + 1u))
++		                             : (GMU_IOVA_HFI + HFI_QUEUE_AT(i));
+ 		/*
+ 		 * THE LEGACY QUEUE IDS ARE NOT 0,1,2,3. Both working ports agree, and patch
+ 		 * 0135 broke this: it replaced a prio[] table (which gave the debug queue 40)
+@@ -1118,15 +1182,19 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		hfi->queue[i].read = 0u;
+ 		hfi->queue[i].write = 0u;
+ 	}
+-	to_memory(hfi_kva, (vm_size_t)(GMU_MAP_PAGES - GMU_HFI_PAGE0) * SMMU_GRANULE);
++	/* the lowmem table lives in ml_io_map'd device memory, which needs no maintenance;
++	 * only the SMMU-mapped buffers do. */
++	if (lowhfi == 0u) {
++		to_memory(hfi_kva, (vm_size_t)(GMU_MAP_PAGES - GMU_HFI_PAGE0) * SMMU_GRANULE);
++	}
+ 	printf("SWEET GPU: G4d-c HFI hdr: version=%u words=%u first_queue=%u queue_words=%u queues=%u/%u;"
+ 	    " q0 type=0x%x words=%u rxwm=%u txwm=%u rxreq=%u\n",
+ 	    hfi->version, hfi->words, hfi->first_queue, hfi->queue_words, hfi->active_queues, hfi->queues,
+ 	    hfi->queue[0].type, hfi->queue[0].words, hfi->queue[0].rx_watermark,
+ 	    hfi->queue[0].tx_watermark, hfi->queue[0].rx_request);
+-	printf("SWEET GPU: G4d-c HFI table @ iova 0x%08x: %u queues (q0=0x%08x q1=0x%08x q2=0x%08x)\n",
+-	    GMU_IOVA_HFI, HFI_QUEUES, GMU_IOVA_HFI + HFI_QUEUE_AT(0), GMU_IOVA_HFI + HFI_QUEUE_AT(1),
+-	    GMU_IOVA_HFI + HFI_QUEUE_AT(2));
++	printf("SWEET GPU: G4d-c HFI table @ %s 0x%08x: %u queues (q0=0x%08x q1=0x%08x)\n",
++	    lowhfi ? "PHYS" : "iova", gmu_hfi_addr, nq,
++	    hfi->queue[0].start, hfi->queue[1].start);
+ 
+ 	/* G4d-j (stage >= 8): run the FULL RPMH init BEFORE waking RSCC. Mainline order is
+ 	 * rpmh_init -> rpmh_start -> fw_start -> hfi_start. Running rpmh_init AFTER fw_start
+@@ -1187,7 +1255,7 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	wr(g, GMU_GENERAL_7, 1);
+ 	wr(g, GMU_CM3_FW_INIT_RESULT, 0);
+ 	wr(g, GMU_CM3_BOOT_CONFIG, 2);
+-	wr(g, GMU_HFI_QTBL_ADDR, GMU_IOVA_HFI);
++	wr(g, GMU_HFI_QTBL_ADDR, gmu_hfi_addr);
+ 	wr(g, GMU_HFI_QTBL_INFO, 1);
+ 	wr(g, GMU_AHB_FENCE_RANGE_0, (1u << 31) | ((0xau << 2) << 18) | 0x8a0u);
+ 	wr(g, GMU_CM3_CFG, 0x4052u);
+@@ -1195,7 +1263,7 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	wr(bif, GBIF_HALT, 0);
+ 	wr(g, GMU_PWR_COL_CP_RESP, 0);
+ 	wr(g, GMU_HFI_SFR_ADDR, GMU_CHIP);
+-	wr(g, GMU_PWR_COL_CP_MSG, GMU_IOVA_LOG | GMU_LOG_PAGES_M1);
++	wr(g, GMU_PWR_COL_CP_MSG, gmu_log_addr);
+ 	wr(g, GMU_SYS_BUS_CONFIG, 1);
+ 	wr(g, GMU_ICACHE_CONFIG, 1);
+ 	wr(g, GMU_DCACHE_CONFIG, 1);
+@@ -1207,11 +1275,11 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	 * the firmware can find its queue table and boot from TCM. Any mismatch here means
+ 	 * the writes are being dropped and the host-side table was never the problem. */
+ 	printf("SWEET GPU: G4d-l config readback qtbl_addr=0x%08x (want 0x%08x) qtbl_info=0x%08x (want 1) boot_config=0x%08x (want 2)\n",
+-	    rd(g, GMU_HFI_QTBL_ADDR), GMU_IOVA_HFI, rd(g, GMU_HFI_QTBL_INFO), rd(g, GMU_CM3_BOOT_CONFIG));
++	    rd(g, GMU_HFI_QTBL_ADDR), gmu_hfi_addr, rd(g, GMU_HFI_QTBL_INFO), rd(g, GMU_CM3_BOOT_CONFIG));
+ 	printf("SWEET GPU: G4d-l config readback cm3_cfg=0x%08x (want 0x4052) general_7=0x%08x (want 1) sfr_addr=0x%08x (want 0x%08x)\n",
+ 	    rd(g, GMU_CM3_CFG), rd(g, GMU_GENERAL_7), rd(g, GMU_HFI_SFR_ADDR), GMU_CHIP);
+ 	printf("SWEET GPU: G4d-l config readback cp_msg=0x%08x (want 0x%08x) fence_ctrl=0x%08x fence_status=0x%08x rpmh_ctrl=0x%08x\n",
+-	    rd(g, GMU_PWR_COL_CP_MSG), GMU_IOVA_LOG | GMU_LOG_PAGES_M1, rd(g, GMU_AO_AHB_FENCE_CTRL),
++	    rd(g, GMU_PWR_COL_CP_MSG), gmu_log_addr, rd(g, GMU_AO_AHB_FENCE_CTRL),
+ 	    rd(g, GMU_AHB_FENCE_STATUS), rd(g, GMU_RPMH_CTRL));
+ 
+ 	/* release the core and wait for the firmware to start */
+@@ -1324,14 +1392,17 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 			    hfi->queue[qi].words, hfi->queue[qi].read, hfi->queue[qi].write);
+ 		}
+ 		/* the GMU's own log buffer - we point the firmware at it via PWR_COL_CP_MSG
+-		 * (GMU_IOVA_LOG) but have never once read it back. */
+-		const volatile uint32_t *lg = (const volatile uint32_t *)(buffers + GMU_BUF_LOG);
++		 * and have never once read it back. On the lowmem path it is in the ml_io_map'd
++		 * carve-out, not in the SMMU-mapped buffers. */
++		const volatile uint32_t *lg = lowhfi
++		    ? (const volatile uint32_t *)((vm_offset_t)hfi - GMU_LOWMEM_HFI + GMU_LOWMEM_LOG)
++		    : (const volatile uint32_t *)(buffers + GMU_BUF_LOG);
+ 		uint32_t lognz = 0;
+ 		for (uint32_t i = 0; i < 1024u; i++) {
+ 			if (lg[i] != 0u) { lognz++; }
+ 		}
+-		printf("SWEET GPU: G4d-k GMU log @ iova 0x%08x: %u of 1024 dwords non-zero\n",
+-		    GMU_IOVA_LOG, lognz);
++		printf("SWEET GPU: G4d-k GMU log @ %s 0x%08x: %u of 1024 dwords non-zero\n",
++		    lowhfi ? "PHYS" : "iova", gmu_log_addr & ~0xfffu, lognz);
+ 		for (uint32_t i = 0; i < 16u; i += 4u) {
+ 			printf("SWEET GPU: G4d-k log[%02u] %08x %08x %08x %08x\n",
+ 			    i, lg[i], lg[i + 1u], lg[i + 2u], lg[i + 3u]);

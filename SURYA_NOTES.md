@@ -2284,3 +2284,34 @@ building killed it. The workflow has a concurrency group that cancels in-progres
 for the run to finish, or batch the patches into one trigger - and remember that `gh run watch`
 reporting "cancelled" with a clean "Applying patch" line means exactly this, not a patch problem.
 No loss here because 0144 is boot-arg gated, so the one surviving build tests both paths.
+
+## *** HFI IS ALIVE (2026-11-15 00:20) - hfi_ctrl_status = 0x00000001 ***
+Run 43646199005, `ARGS='sweetgpu=10'` (stage 1, SMMU path):
+  158: G4d-c HFI hdr: version=0 words=54 first_queue=6 queue_words=12 queues=4/4; q0 type=0xa00 ...
+  159: G4d-c HFI table @ iova 0x60100000: 4 queues (q0=0x601000e0 q1=0x601010e0)
+  169: G4d-d hfi_ctrl_status=0x00000001 hfi_version=0x00000000 gmu2host_intr=0x00000000 fw=0xbabeface
+THE FIX WAS 0143: the legacy HFI queue IDs. Queue 1 must be id 4 (MSG / response queue), not id 1
+(the DSP queue, which must be disabled). Patch 0135 had broken this by replacing a correct prio[]
+table with a uniform `i | (10 << 8)`, reasoning from mainline's NON-legacy a6xx_hfi_queue_init. The
+GMU had no MSG queue to find and rejected CTRL_INIT with 0xfe for three sessions.
+`hfi_version=0` is CORRECT and not a symptom - mxt's working log reads the same ("HFI_CTRL_STATUS 1,
+HFI_VERSION_INFO 0 (v1)"). We are now at their 0085 milestone.
+
+### A/B RESULT: surya's GMU DOES use the SMMU - keep our context, do NOT adopt fajita's addressing
+Same kernel, two boot-args:
+  sweetgpu=10                 -> hfi_ctrl_status 0x00000001                      WORKS
+  sweetgpu=10 sweetlowhfi=1   -> 0x00000000, gmu2host_intr 0x00800000 (CM3_FAULT) FAILS
+  (147: G4d-n LOWMEM HFI table pa=0xb0000000 kva=0xfffffe3ff9520000 log pa=0xb0008000, 2 queues, NO SMMU
+   149: G4d-c HFI table @ PHYS 0xb0000000: 2 queues (q0=0xb0001000 q1=0xb0002000))
+So the GMU SMMU context WAS translating all along and 0133/0134/0139 were real fixes, not wasted
+work - the SMMU was never the problem, and "FSR 0x400, no fault" meant what it said. fajita's
+physical-address scheme is specific to sdm845/their GMU; on SM7150 the GMU faults on untranslated
+low-DRAM addresses. sweetlowhfi stays OFF by default; keep the code for reference only.
+Corollary: 0144's byte-vs-dword table->size question is moot for us - the SMMU path uses KGSL dwords
+(54) and that is what works here.
+
+### NEXT: G4d-e, sweetgpu=11 (no rebuild) - send H2F_MSG_INIT on q0, poll q1
+mxt's working ack for comparison: H2F_MSG_INIT ACK 0x0002047e (id 126, 4 dw, type V1 ACK), seq 1,
+error 0; then H2F_MSG_FW_VER seq 2 error 0. After that their CMD queue read=write=7, MSG queue
+read=write=8. Then the ladder is cmd-db ARC levels -> CP memory/ring/SQE -> zap (a615_zap.mdt is
+already on disk and needs no hand-built metadata) -> CP_SET_SECURE_MODE 0 -> first submit.

@@ -1,0 +1,69 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index d792df3..4cb8dbf 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1540,6 +1540,46 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	if ((s3 & 1u) != 0u || q1_w != 0u) {
+ 		printf("SWEET GPU: %s *** HFI HANDSHAKE SUCCEEDED *** (status 0x%08x, q1_write=%u). The kernel is talking to the GMU. Next: perf/bw tables, then GX rail up.\n",
+ 		    stage_label, s3, q1_w);
++		/*
++		 * G4d-f: H2F_MSG_FW_VER, the second message of the v1 start sequence. mxt's
++		 * working order is MSG_INIT -> FW_VER -> PERF_TBL -> BW_VOTE_TBL -> TEST; the
++		 * tables need cmd-db parsing (gpu_dcvs_votes) which we do not have yet, but
++		 * FW_VER is two dwords and tells us whether the protocol keeps working past
++		 * MSG_INIT - and whether the CM3_FAULT we see after a clean ack actually
++		 * matters or is just the firmware waiting for a sequence we abandoned.
++		 * Sequence numbers must advance: MSG_INIT used seq 1, so this is seq 2.
++		 */
++		uint32_t w1 = hfi_u->queue[0].write;
++		uint32_t vhdr = 0x05u | (2u << 8) | (0u << 16) | (2u << 20); /* FW_VER, 2 dw, seq 2 */
++		q0_data[w1 + 0u] = vhdr;
++		q0_data[w1 + 1u] = 0x10080000u;     /* the version we support: 1.8, as mxt sends */
++		q0_data[w1 + 2u] = 0xfafafafau;
++		q0_data[w1 + 3u] = 0xfafafafau;
++		hfi_u->queue[0].write = w1 + 4u;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		uint32_t prev_q1w = q1_w;
++		wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
++		wr(g, GMU_HOST2GMU_INTR_SET, 1u);
++		uint32_t vq1w = prev_q1w, vintr = 0;
++		for (int i = 0; i < 1000; i++) {
++			vintr = rd(g, GMU_GMU2HOST_INTR_INFO);
++			vq1w = hfi_u->queue[1].write;
++			if (vq1w != prev_q1w) { break; }
++			IODelay(100);
++		}
++		printf("SWEET GPU: %s FW_VER sent hdr=0x%08x at q0[w=%u]; q1[w=%u->%u] intr=0x%08x\n",
++		    stage_label, vhdr, w1, prev_q1w, vq1w, vintr);
++		if (vq1w != prev_q1w) {
++			uint32_t a0 = q1_data[prev_q1w + 0u], a3 = q1_data[prev_q1w + 3u];
++			printf("SWEET GPU: %s FW_VER ack hdr=0x%08x (id=0x%02x size=%u type=%u) err=0x%08x ver=0x%08x -> %u.%u step %u\n",
++			    stage_label, a0, a0 & 0xffu, (a0 >> 8) & 0xffu, (a0 >> 16) & 0xfu,
++			    q1_data[prev_q1w + 2u], a3, a3 >> 28, (a3 >> 16) & 0xfffu, a3 & 0xffffu);
++			printf("SWEET GPU: %s *** TWO MESSAGES ACKNOWLEDGED - the v1 HFI protocol is running ***\n",
++			    stage_label);
++		} else {
++			printf("SWEET GPU: %s FW_VER got no answer; MSG_INIT acked but the protocol stops there\n",
++			    stage_label);
++		}
+ 	} else {
+ 		printf("SWEET GPU: %s GMU did not answer within ~100 ms. CTRL_STATUS 0x%08x unchanged.\n", stage_label, s3);
+ 	}
+@@ -1555,8 +1595,15 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		uint32_t pgshb = (id1b & (1u << 31)) ? 16u : 12u;
+ 		vm_offset_t cb1 = ss + (numpg << pgshb) + (vm_offset_t)GMU_CTX * (1u << pgshb);
+ 		uint32_t fsr2 = smmu_rd(cb1, SMMU_CB_FSR);
+-		printf("SWEET GPU: %s context post-ring: fsr=0x%08x far=0x%08x%08x fsynr0=0x%08x (nonzero fault bits => SMMU translation fault during HFI processing)\n",
+-		    stage_label, fsr2, smmu_rd(cb1, SMMU_CB_FAR_HI), smmu_rd(cb1, SMMU_CB_FAR_LO), smmu_rd(cb1, SMMU_CB_FSYNR0));
++		/* FSR bit 10 (0x400) is the FORMAT field (AArch64), NOT a fault - mxt's working
++		 * log carries the same 0x400. The fault bits are 0x3f (TF/AFF/PF/EF/TLBMCF/...).
++		 * The old wording here claimed any non-zero value was a translation fault, which
++		 * is how 0x400 got misread as a second failure for several sessions. */
++		printf("SWEET GPU: %s context post-ring: fsr=0x%08x far=0x%08x%08x fsynr0=0x%08x (%s)\n",
++		    stage_label, fsr2, smmu_rd(cb1, SMMU_CB_FAR_HI), smmu_rd(cb1, SMMU_CB_FAR_LO),
++		    smmu_rd(cb1, SMMU_CB_FSYNR0),
++		    (fsr2 & 0x3fu) ? "FAULT BITS SET - real SMMU translation fault" :
++		    "no fault bits; 0x400 is FORMAT=AArch64, which is normal");
+ 	}
+ }
+ 

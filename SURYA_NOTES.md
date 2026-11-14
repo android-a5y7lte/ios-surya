@@ -2315,3 +2315,37 @@ mxt's working ack for comparison: H2F_MSG_INIT ACK 0x0002047e (id 126, 4 dw, typ
 error 0; then H2F_MSG_FW_VER seq 2 error 0. After that their CMD queue read=write=7, MSG queue
 read=write=8. Then the ladder is cmd-db ARC levels -> CP memory/ring/SQE -> zap (a615_zap.mdt is
 already on disk and needs no hand-built metadata) -> CP_SET_SECURE_MODE 0 -> first submit.
+
+## *** HFI HANDSHAKE SUCCEEDED (2026-11-15 00:28) - MSG_INIT ACKED ***
+`ARGS='sweetgpu=11'` (stage 2, G4d-e), run 43646199005:
+  186: G4d-e send GMU_INIT on q0 and poll q1 for the GMU's ack
+  188: G4d-e wrote GMU_INIT hdr=0x00100501 at q0[w=0], new write=8 (padded 5->8 dwords)
+  189: G4d-e intr_info=0x00800001 hfi_status=0x00000001 hfi_version=0x00000000 q1[r=0 w=4]
+  190: G4d-e q1 ack hdr=0x0002047e (id=0x7e size=4 type=2) dw1=0x00100001 dw2=0x00000000 dw3=0x10080000
+  191: G4d-e *** HFI HANDSHAKE SUCCEEDED *** (status 0x00000001, q1_write=4)
+`hdr=0x0002047e` is BYTE-IDENTICAL to mxt's working ack (id 126, 4 dw, type V1 ACK), dw2 (error) = 0,
+and dw3=0x10080000 confirms firmware 1.8 - the same value DTCM word 0 holds, so that reading was right.
+All four queue types now match mxt exactly: 0xa00 / 0xa04 / 0x2805 / 0x1401 with q3 status 0.
+intr_info bit 0 = MSGQ (mainline A6XX_GMU_GMU2HOST_INTR_INFO_MSGQ), i.e. "a message is waiting" - that
+is the ack notification, not an error.
+
+OPEN: CM3_FAULT (bit 23) is set AFTER a clean ack with error 0. The dump region IS mapped
+(gmu_map[] carries GMU_IOVA_DUMP at GMU_BUF_DUMP_SZ) and the MSG_INIT payload matches mxt's
+{ hdr, 0, GMU_VA_DUMP, GMEM_DUMP_SIZE, GMU_COLD_BOOT } exactly, so the leading theory is simply that
+we stop mid-sequence: mxt goes MSG_INIT -> FW_VER -> PERF_TBL -> BW_VOTE_TBL -> TEST without pausing.
+0145 tests that by sending the next message.
+
+ALSO FIXED in 0145: the G4d-e post-ring message claimed "nonzero fault bits => SMMU translation fault"
+for ANY non-zero FSR. FSR bit 10 (0x400) is the FORMAT field (AArch64) and mxt's working log carries
+the same 0x400; the real fault bits are 0x3f. That wording is how 0x400 got misread as a second
+failure across several sessions - 0133 corrected one site and missed this one.
+
+### Patch 0145: H2F_MSG_FW_VER (seq 2), the second message of the v1 start
+Two dwords: hdr (id 0x05, size 2, seq 2) + 0x10080000, exactly as mxt sends. Prints the ack, the error
+word and the decoded version. Reads either:
+  "TWO MESSAGES ACKNOWLEDGED - the v1 HFI protocol is running"  -> go on to the tables
+  "FW_VER got no answer; MSG_INIT acked but the protocol stops there" -> the CM3_FAULT is real and
+  blocking, and that is the next thing to chase.
+NEXT AFTER THAT: gpu_dcvs_votes (cmd-db parse: gfx.lvl 0x30050, mx.lvl 0x30010, cx.lvl 0x30000) feeding
+H2F_MSG_PERF_TBL + H2F_MSG_BW_VOTE_TBL + H2F_MSG_TEST, which completes a6xx_gmu_hfi_start. Then the
+GX rail (0130, already working) and the CP ladder.

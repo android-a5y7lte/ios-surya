@@ -2378,3 +2378,31 @@ error 0) followed by a FW_VER ack, i.e. "TWO MESSAGES ACKNOWLEDGED", and for CM3
 from intr_info. After that: gpu_dcvs_votes (cmd-db: gfx.lvl 0x30050, mx.lvl 0x30010, cx.lvl 0x30000)
 -> H2F_MSG_PERF_TBL (id 4) + H2F_MSG_BW_VOTE_TBL (id 3) + H2F_MSG_TEST (id 5) completes
 a6xx_gmu_hfi_start; then GX rail (0130, works) and the CP ladder.
+
+### 0146 RESULT (2026-11-15 01:00): REAL MSG_INIT ACKED, and the fault narrows to the SECOND L3 TABLE
+  188: G4d-e wrote GMU_INIT hdr=0x00100500 at q0[w=0]   <- id 0 at last, the actual MSG_INIT
+  189: G4d-e intr_info=0x00800001 hfi_status=0x00000001 q1[r=0 w=4]
+  190: G4d-e q1 ack hdr=0x0002047e (id=0x7e size=4 type=2) dw1=0x00100000 dw2=0x00000000 dw3=0x0e550e55
+  191: G4d-e drained q1: read advanced 0 -> 4            <- drain works
+  193: G4d-e FW_VER sent hdr=0x00200201 ...; q1[w=4->4] intr=0x00000000
+  194: G4d-e FW_VER got no answer
+MSG_INIT acks with error 0 and dw1 echoing id 0; dw3 is 0x0e550e55, not the 0x10080000 we used to get,
+confirming we had been receiving FW_VER's reply all along. Both 0146 fixes are good. BUT CM3_FAULT is
+still set in the SAME poll as the ack (0x00800001 = MSGQ bit 0 + CM3_FAULT bit 23), and FW_VER is
+still unanswered - the M3 acks and crashes.
+
+STRONG NEW LEAD - IT IS THE SECOND L3 TABLE (l3b):
+  l3a: dummy 0x60000000, HFI 0x60100000   -> GMU READS our queue table and WRITES acks through it. WORKS.
+  l3b: dump  0x60200000, log 0x60300000   -> NOT ONE GMU WRITE, ever, in any boot this session.
+The log reading "0 of 1024 dwords non-zero" every single run is the same fact seen from another angle.
+MSG_INIT's dbg_buffer_addr points at 0x60200000, i.e. INTO l3b, so the firmware acks and then faults
+writing its debug buffer through an L3 table that may never have been wired correctly.
+Index maths all look right on paper (l2 idx (iova>>21)&0x1ff: 0x100 for l3a, 0x101 for l3b; l3 idx
+(iova>>12)&0x1ff: 0 and 0x100 within each), so the next step is to TEST, not to re-derive:
+1. CHEAPEST: send MSG_INIT with dbg_buffer_addr = 0 and dbg_buffer_size = 0. KGSL permits 0 (no debug
+   buffer). Our own code comment says "dbg_buffer_addr - was 0, i.e. iova 0" - it was 0 before I
+   changed it. If CM3_FAULT disappears and FW_VER answers, l3b is the bug and nothing else is.
+2. Then either fix l3b, or sidestep it: move dump+log into the SAME 2 MB block as the HFI region so
+   every GMU buffer lives in l3a (needs the 1 MiB slot layout to change, GMU_IOVA_DUMP/LOG -> e.g.
+   0x60120000 / 0x60130000).
+3. Add a readback of the l3b PTEs next to the existing G4d-ctx readback so this is observable.

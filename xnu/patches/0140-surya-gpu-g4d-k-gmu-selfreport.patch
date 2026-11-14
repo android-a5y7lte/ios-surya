@@ -1,0 +1,49 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 2caaefc..61f36ed 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1238,6 +1238,44 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		} else {
+ 			printf("SWEET GPU: G4d-d HFI not alive yet (status 0x%08x). Vendor flow sends GMU_INIT next; that is G4d-e.\n", s2);
+ 		}
++
++		/*
++		 * G4d-k: PURE DIAGNOSTICS, no behaviour change. Six host-side configuration
++		 * fixes (0133 SMMU SIDs, 0135 queue header, 0136 VA layout, 0137 WFI config,
++		 * 0138 queue-table size, 0139 context bank 0) each left CTRL_STATUS at 0xfe,
++		 * so stop proposing fixes and read what the firmware itself reports.
++		 *
++		 * The DTCM version words are the key one: the firmware fills them at RUNTIME,
++		 * so G4b's read (core still in reset) is always 0 and told us nothing all
++		 * session. mxtpasontop's working a618 reports core 0x10110000 == 1.17. A
++		 * non-zero value here means the firmware completed its own init and HFI is a
++		 * host-side problem after all; 0 means it never got that far and HFI is only a
++		 * symptom of something upstream.
++		 */
++		to_memory(buffers, round_page((vm_size_t)GMU_MAP_PAGES * SMMU_GRANULE));
++		printf("SWEET GPU: G4d-k DTCM versions POST-BOOT core=0x%08x pwr=0x%08x hfi=0x%08x (mxt's working a618: core 0x10110000 = 1.17)\n",
++		    rd(g, GMU_DTCM_VERSIONS), rd(g, GMU_DTCM_VERSIONS + 8), rd(g, GMU_DTCM_VERSIONS + 16));
++		printf("SWEET GPU: G4d-k fence_status=0x%08x rpmh_power_state=0x%08x cm3_cfg=0x%08x intr_info=0x%08x\n",
++		    rd(g, GMU_AHB_FENCE_STATUS), rd(g, GMU_RPMH_POWER_STATE), rd(g, GMU_CM3_CFG),
++		    rd(g, GMU_GMU2HOST_INTR_INFO));
++		for (uint32_t qi = 0; qi < HFI_QUEUES; qi++) {
++			printf("SWEET GPU: G4d-k q%u status=0x%08x start=0x%08x type=0x%08x words=%u rd=%u wr=%u\n",
++			    qi, hfi->queue[qi].status, hfi->queue[qi].start, hfi->queue[qi].type,
++			    hfi->queue[qi].words, hfi->queue[qi].read, hfi->queue[qi].write);
++		}
++		/* the GMU's own log buffer - we point the firmware at it via PWR_COL_CP_MSG
++		 * (GMU_IOVA_LOG) but have never once read it back. */
++		const volatile uint32_t *lg = (const volatile uint32_t *)(buffers + GMU_BUF_LOG);
++		uint32_t lognz = 0;
++		for (uint32_t i = 0; i < 1024u; i++) {
++			if (lg[i] != 0u) { lognz++; }
++		}
++		printf("SWEET GPU: G4d-k GMU log @ iova 0x%08x: %u of 1024 dwords non-zero\n",
++		    GMU_IOVA_LOG, lognz);
++		for (uint32_t i = 0; i < 16u; i += 4u) {
++			printf("SWEET GPU: G4d-k log[%02u] %08x %08x %08x %08x\n",
++			    i, lg[i], lg[i + 1u], lg[i + 2u], lg[i + 3u]);
++		}
+ 	}
+ 
+ 	/* G4d-e: send the first H2F message - GMU_INIT - on queue 0 and watch for the GMU's

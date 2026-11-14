@@ -2094,3 +2094,30 @@ If 0139 does not move CTRL_STATUS off 0xfe, STOP patching and instrument: mxt pr
 `gpu_gmu_state("before start")` immediately before `CM3_SYSRESET=0`; add the same dump to ours and
 diff the two register states side by side. Five straight "this looks like the fix" patches
 (0133/0135/0136/0137/0138) all left 0xfe untouched.
+
+### 0139 RESULT: s2cr=0x300 confirmed, HFI still 0xfe (2026-11-14)
+`G4d-ctx readback smr=0x80000005 s2cr=0x00000300 smr2=0x80000004 s2cr2=0x00000300 cbar=0x0001f300
+sctlr=0x00001027 (M=1) ttbr0=0x0001000104060000` - bank 0 with ASID 1, byte-identical to the working
+port's SMMU state. `hfi_ctrl_status=0x000000fe` unchanged. Keep 0139 (the bank allocation now matches
+mxt and leaves CB1 for the CP) but it was not the blocker.
+
+SIX host-side configuration fixes have now each left 0xfe untouched: 0133 (both GMU SIDs), 0135 (queue
+header fields), 0136 (KGSL VA layout), 0137 (WFI config), 0138 (queue-table size 54), 0139 (context
+bank 0). Every one was a genuine mismatch against a working port, every one was correct, none mattered.
+That pattern says the host-side table/register configuration is NOT where the fault is.
+
+### Patch 0140: stop patching, make the firmware report on itself (G4d-k, diagnostics only)
+No behaviour change. After the failed CTRL_INIT, dump:
+1. THE DTCM VERSION WORDS, RE-READ AFTER THE CORE IS RELEASED. These are filled by the firmware at
+   RUNTIME. G4b reads them with the core still in reset, which is why they printed 0 every single boot
+   this session and why that zero was meaningless (both vendor blobs are zero-filled at 0x7FE0/0x3FE0;
+   the images are flat Thumb code). Post-boot, mxt's working a618 reports core 0x10110000 == 1.17.
+   NON-ZERO => firmware finished its own init, HFI is a host-side problem after all.
+   ZERO       => firmware never gets that far; 0xfe is a symptom, and the real fault is upstream of
+                 HFI entirely (clocks, RPMh, GBIF/AHB fencing, TCM retention).
+2. fence_status / rpmh_power_state / cm3_cfg / intr_info at the moment of failure.
+3. The four queue headers post-CTRL_INIT - did the GMU write to them at all?
+4. The GMU's OWN LOG BUFFER, which we hand the firmware via PWR_COL_CP_MSG (GMU_IOVA_LOG 0x60300000)
+   and have never once read back. Non-zero content there is the firmware telling us what it is doing.
+Run at sweetgpu=10 (stage 1): mxt's HFI came up at their equivalent of that, and stage 1 is confirmed
+to reproduce 0xfe here with no GX rail, no SPTPRAC and no fault.

@@ -2575,3 +2575,22 @@ Also: sweetgx/sweetmx now DEFAULT to 2/2 (the cmd-db vote for the 180 MHz boot l
 mx idx 2), so the boot-args are no longer needed.
 TEST: ARGS='sweetgpu=18'. Expect the same five acks, then "gpu OOB ACKNOWLEDGED ... PWR_ON" and
 "THE ADRENO 618 3D CORE IS POWERED AND ANSWERING".
+
+## ***** 0150 RESULT (2026-11-15 21:55): THE ADRENO 618 3D CORE IS POWERED AND ANSWERING *****
+`ARGS='sweetgpu=18'` (no sweetgx/sweetmx needed), run 43752965344:
+  171: G5-a gfx_rail_on: GX_VOTE_IDX=2 MX_VOTE_IDX=2 (the new defaults)
+  172: G5-a OOB boot_slumber acknowledged (INTR_INFO 0x40000000, SPTPRAC 0x00000028)
+  198-232: all five HFI messages acked err=0 with the rail voted first; a6xx_gmu_hfi_start COMPLETE
+  234: G6-a gpu OOB ACKNOWLEDGED (intr_info 0x01000001) gx_gdscr=0xf8222000 (PWR_ON) sptprac=0x28 rpmh_power_state=0x0
+  236: G6-a RBBM_STATUS=0x00000001 RBBM_INT_0_STATUS=0x00000000
+  237: G6-a CP_SQE_CNTL=0x00000000 CP_SQE_INSTR_BASE=0x00000000
+  238: G6-a CP_SCRATCH_REG0 0x00000000 -> wrote 0x5a5a1234 -> read 0x5a5a1234 (THE 3D CORE TAKES WRITES)
+First access to the 3D core ever. gpu OOB is bit 16 / ack bit 24 (confirmed on device), GX GDSC went
+0x00222001 -> 0xf8222000 (PWR_ON), RPMH_POWER_STATE left slumber (0xf -> 0x0). RBBM_STATUS 0x1 and
+SQE control/base at cold zero is the expected state of a core that is powered but not started.
+NEXT (mxt 0093-0098 and fajita 0146-0166 are the references; fajita first, it is the working one):
+1. CP memory behind the 3D core's own SMMU context (CB1 / ASID 2, SIDs for gfx3d), ring buffer,
+   SQE microcode a630_sqe.fw (research/fw/vendor/, needs a payload blob like GmuFW/ZapFW).
+2. a6xx_start-style core register setup with SQE still at cold zero.
+3. zap: a615_zap.mdt straight to PAS_INIT_IMAGE with the core powered, then MEM_SETUP/AUTH_AND_RESET.
+4. CP_SQE_CNTL=1, CP_ME_INIT, CP_SET_SECURE_MODE 0, first submit.

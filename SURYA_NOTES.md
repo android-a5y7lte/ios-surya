@@ -2620,3 +2620,41 @@ SQE microcode: payload blob "SqeFW" = research/fw/vendor/a630_sqe.fw (31980 B), 
 version header and is stripped as Linux does (adreno_fw_create_bo: data + 4).
 tools/surya-test4.sh now adds SqeFW, plus ZapMdt/ZapB02 (a615_zap.mdt / .b02) ready for the zap rung.
 JIMMY MUST `git pull` before the test or the blob will not be in the payload.
+
+## 0151 RESULT (2026-11-15 22:27): CP reached SQE fetch, faulted on bit 6 of the PTE
+`ARGS='sweetgpu=18'` on run 43755781577, after `git pull` (and confirming SqeFW in the blobs line):
+  244: G6-b SQE microcode: blob pa=0x10251c000 31980 bytes, header 0x00000000 stripped,
+       7994 dwords: 016ee187 01001eba 88020001           <- fajita's log: 0x16ee19a 0x1001ee1 0x1190001
+  245: G6-b cp context: cb1 sctlr=0x00001027 ttbr0=0x0002000103d74000 smr0=0x80000000 s2cr0=0x00000301 -> took
+  246: G6-b cp memory: ring 0x40000000 (32 KiB) sqe 0x40010000 (read-only) scratch 0x40020000;
+       block phys 0x104080000 l2[0]=0x104080003
+  247: G6-b cp before configuration: sqe_cntl=0 hw_fault=0 cp_irq=0 rptr=0 wptr=0 cp_status1=0x01000000
+  248: G6-b cp configured: rb_cntl=0x0800020c sqe_base=0x40010000 rb_base=0x40000000
+       roq2=0x010000c0 roq1=0x8040362c mem_pool=128 addr_mode=0x1 gbif_halt=0
+  249: G6-b SQE enabled: sqe_cntl=0x00000001 cp_status1=0x81004000 hw_fault=0
+  250: G6-b CP_ME_INIT: ring did NOT drain in 2 s: rptr=0 wptr=9 rbbm_status=0x00800005
+       cp_status1=0x81000006 hw_fault=0 cp_irq=0x00000080 protect=0 rbbm_irq=0
+  251: G6-b cb1 after the fetch: fsr=0x00000408 far=0x0000000040010000 fsynr0=0x00000003 -> REAL FAULT BITS
+
+Everything reached the SQE: SMMU context took, every CP configuration write read back right,
+cp_status1 went 0x01000000 -> 0x81004000 (SQE enabled) -> 0x81000006 (SQE executing, GPU busy per
+rbbm_status). Then the FIRST microcode fetch was denied by the SMMU:
+  fsr=0x408 = FORMAT (bit 10, 0x400) + PERMISSION FAULT (bit 3, 0x8)
+  far=0x40010000 = CP_VA_SQE, byte zero of the instruction stream
+
+The cause is one bit in our CP PTE. Fajita's working GPU_PTE_PAGE sets AP[1] (bit 6), ours does not:
+  fajita (works): 3 | (1<<10) | (2<<8) | (1<<6) | (1<<11) = 0xe43  (SQE OR's bit 7: 0xec3)
+  ours  (faults): 3 | PTE_GMU = 3 | (2<<8) | (1<<10) | (1<<11)  = 0xe03  (SQE OR's bit 7: 0xe83)
+With bit 7 set for SQE RO, fajita gets AP[2:1]=0b11 ("RO, both privilege levels"), we get AP[2:1]=0b10
+("RO, EL1 only, EL0 none"). Despite S2CR_PRIV=3 on the CP context, the SQE instruction fetch arrives
+unprivileged and is denied. The GMU side works because the GMU accesses as privileged, so AP[2:1]=00
+is enough for its buffers.
+
+### PLANNED FOR NEXT SESSION: patch 0152
+One-bit fix: introduce `#define PTE_CP (PTE_GMU | (1ull << 6))` and use it for the CP's three L3
+entries (ring, SQE with +PTE_READ_ONLY, scratch). Leave PTE_GMU alone - it works and widening it is
+unnecessary. Also tidy the two cast-alignment warnings 0151 compiled with (lines 1539 and 1546:
+cast from `const uint8_t*` to `const uint32_t*`; the blob is page-aligned so the warning is cosmetic).
+EXPECTED NEXT LOG: `CP_ME_INIT: ring idle (RPTR=WPTR=9) rbbm_status=0x1`. After that: the zap shader
+(ZapMdt + ZapB02 are already in the payload), CP_SET_SECURE_MODE 0, then a NOP + CP_MEM_WRITE +
+CP_EVENT_WRITE(CACHE_FLUSH_TS) first submit.

@@ -1,0 +1,108 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 265c0b1..0d5f99c 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1018,7 +1018,10 @@ sweet_gpu_g4d_setup(void)
+ static bool
+ gmu_gx_rail_sptprac(vm_offset_t g)
+ {
+-	int gx_idx = 3, mx_idx = 3;
++	/* 2/2, not 3/3: 0149's cmd-db votes put the 180 MHz boot level at gfx ARC index 2 and
++	 * mx ARC index 2 (vote 0x00400202), which is what mxt measured and what every working
++	 * run here has passed by hand as sweetgx=2 sweetmx=2. */
++	int gx_idx = 2, mx_idx = 2;
+ 	(void)PE_parse_boot_argn("sweetgx", &gx_idx, sizeof(gx_idx));
+ 	(void)PE_parse_boot_argn("sweetmx", &mx_idx, sizeof(mx_idx));
+ 	printf("SWEET GPU: G5-a gfx_rail_on: BOOT_SLUMBER_OPTION=0 GX_VOTE_IDX=%d MX_VOTE_IDX=%d"
+@@ -1347,6 +1350,79 @@ sweet_gpu_g5b_dcvs_read(void)
+ 	return true;
+ }
+ 
++/*
++ * G6-a: the first touch of the 3D core. a6xx_gmu_hfi_start is complete, the GX rail was
++ * voted and SPTPRAC enabled before HFI (0130), so what remains of _adreno_start's power-up
++ * is the "gpu" out-of-band request that tells the GMU to keep GX up while the host uses it.
++ * For the a615 family (legacy) the OOB bits are set BIT(req + 16), ack BIT(req + 24), with
++ * req 0 = GPU and req 6 = BOOT_SLUMBER - so GPU is bit 16 / ack bit 24. (The bit 30 / 31
++ * pair noted from yavuzhanozyer's a660 driver is the NON-legacy numbering and is not ours;
++ * mainline a6xx_gmu_oob_bits and mxt's gmu_oob_set agree on 16/24 for this family.)
++ * Core registers are read ONLY if the OOB is acknowledged AND the GX GDSC reports PWR_ON:
++ * touching an unpowered core is a bus error, not a zero. Everything here is a read except
++ * one scratch-register write/readback, the cheapest proof that the core takes writes.
++ * The OOB is left held so the next rung (CP memory, SQE, zap) can build on a powered core.
++ */
++#define GPU_CORE_PA             0x05000000u
++#define GPU_CORE_SIZE           0x00040000u
++#define OOB_GPU_SET             (1u << 16)
++#define OOB_GPU_ACK             (1u << 24)
++#define A6XX_RBBM_INT_0_STATUS  (4u * 0x0201u)
++#define A6XX_RBBM_STATUS        (4u * 0x0210u)
++#define A6XX_CP_SCRATCH_REG0    (4u * 0x0883u)
++#define A6XX_CP_SQE_CNTL        (4u * 0x0808u)
++#define A6XX_CP_SQE_INSTR_BASE  (4u * 0x0830u)
++
++static void
++sweet_gpu_g6a_core_oob(vm_offset_t g)
++{
++	printf("SWEET GPU: G6-a request the gpu OOB (set bit 16, ack bit 24) - keep GX up for the host\n");
++	wr(g, GMU_GMU2HOST_INTR_CLR, OOB_GPU_ACK);
++	wr(g, GMU_HOST2GMU_INTR_SET, OOB_GPU_SET);
++	uint32_t info = 0;
++	bool ok = false;
++	for (int i = 0; i < 2000; i++) {
++		info = rd(g, GMU_GMU2HOST_INTR_INFO);
++		if ((info & OOB_GPU_ACK) != 0u) {
++			ok = true;
++			break;
++		}
++		IODelay(100);
++	}
++	wr(g, GMU_GMU2HOST_INTR_CLR, OOB_GPU_ACK);
++	vm_offset_t cc = ml_io_map(GPUCC_PA, GPUCC_SIZE);
++	uint32_t gx = cc ? rd(cc, GPU_CC_GX_GDSCR) : 0u;
++	printf("SWEET GPU: G6-a gpu OOB %s (intr_info 0x%08x) gx_gdscr=0x%08x (%s) sptprac=0x%08x rpmh_power_state=0x%x\n",
++	    ok ? "ACKNOWLEDGED" : "TIMED OUT", info, gx, (gx & (1u << 31)) ? "PWR_ON" : "OFF",
++	    rd(g, GMU_SPTPRAC_PWR_CLK_STATUS), rd(g, GMU_RPMH_POWER_STATE));
++	if (!ok || (gx & (1u << 31)) == 0u) {
++		printf("SWEET GPU: G6-a GX is not confirmed powered - NOT touching the 3D core's registers\n");
++		return;
++	}
++	vm_offset_t gpu = ml_io_map(GPU_CORE_PA, GPU_CORE_SIZE);
++	if (gpu == 0) {
++		printf("SWEET GPU: G6-a could not map the GPU core at 0x%08x\n", GPU_CORE_PA);
++		return;
++	}
++	printf("SWEET GPU: G6-a about to read the 3D core (first access ever)\n");
++	uint32_t st = rd(gpu, A6XX_RBBM_STATUS);
++	printf("SWEET GPU: G6-a RBBM_STATUS=0x%08x RBBM_INT_0_STATUS=0x%08x\n",
++	    st, rd(gpu, A6XX_RBBM_INT_0_STATUS));
++	/* RBBM_SECVID_TRUST_CNTL is deliberately not read: the core is still in secure mode
++	 * until the zap shader runs, and a secure-register access from here is not a safe probe. */
++	printf("SWEET GPU: G6-a CP_SQE_CNTL=0x%08x CP_SQE_INSTR_BASE=0x%08x\n",
++	    rd(gpu, A6XX_CP_SQE_CNTL), rd(gpu, A6XX_CP_SQE_INSTR_BASE));
++	uint32_t before = rd(gpu, A6XX_CP_SCRATCH_REG0);
++	wr(gpu, A6XX_CP_SCRATCH_REG0, 0x5a5a1234u);
++	uint32_t after = rd(gpu, A6XX_CP_SCRATCH_REG0);
++	wr(gpu, A6XX_CP_SCRATCH_REG0, before);
++	printf("SWEET GPU: G6-a CP_SCRATCH_REG0 0x%08x -> wrote 0x5a5a1234 -> read 0x%08x (%s)\n",
++	    before, after, after == 0x5a5a1234u ? "THE 3D CORE TAKES WRITES" : "write did not stick");
++	if (after == 0x5a5a1234u) {
++		printf("SWEET GPU: G6-a *** THE ADRENO 618 3D CORE IS POWERED AND ANSWERING *** Next: CP memory, SQE, zap.\n");
++	}
++}
++
+ /* KGSL's H2F ids; 0146 established that ours were wrong. INIT 0 and FW_VER 1 are sent
+  * inline in G4d-e, these three finish a6xx_gmu_hfi_start. */
+ #define H2F_MSG_BW_VOTE_TBL_ID  0x03u
+@@ -1993,6 +2069,11 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 						    stage_label, "H2F_MSG_TEST", m, 2u)) {
+ 							printf("SWEET GPU: %s *** a6xx_gmu_hfi_start COMPLETE - PERF_TBL, BW_VOTE_TBL and TEST all acknowledged. Next: core OOB + the CP ladder ***\n",
+ 							    stage_label);
++							if (stage >= 9) {
++								sweet_gpu_g6a_core_oob(g);
++							} else {
++								printf("SWEET GPU: G6-a skipped: the GX rail is only voted at sweetgpu=18\n");
++							}
+ 						}
+ 					}
+ 				}

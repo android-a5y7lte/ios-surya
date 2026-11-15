@@ -2554,3 +2554,24 @@ NEXT, in order:
    metadata), with the GPU powered this time - the earlier -3145797 was sdm845's a630_zap.mbn sent
    with the core unpowered.
 4. CP_SET_SECURE_MODE 0, CP first command, first submit.
+
+### Patch 0150: G6-a - the gpu OOB and the first read of the 3D core (sweetgpu=18)
+CORRECTION to the two entries above: the core OOB is NOT bit 30 / bit 31 on this GPU. That pair is
+the non-legacy numbering in yavuzhanozyer's a660 driver. For the a615 family (a618 included) the
+OOB bits are set BIT(req + 16), ack BIT(req + 24): GPU is req 0 -> set bit 16, ack bit 24;
+BOOT_SLUMBER is req 6 -> 22 / 30 (what 0130 already uses). mainline a6xx_gmu_oob_bits and mxt's
+gmu_oob_set agree. Clearing an OOB is a write of BIT(req + 24) to HOST2GMU_INTR_SET.
+Order, matching mainline's legacy path and mxt: GX rail vote (boot_slumber OOB) + SPTPRAC BEFORE HFI
+(stage 9 already does this), the five-message hfi start, THEN the gpu OOB, then core registers.
+0150 adds, only at stage >= 9 and only after "a6xx_gmu_hfi_start COMPLETE":
+- gpu OOB request, 200 ms poll for bit 24
+- gx_gdscr / SPTPRAC / RPMH_POWER_STATE report; core registers are touched ONLY if the OOB is acked
+  AND gx_gdscr has PWR_ON (bit 31) - an unpowered core is a bus error, not a zero
+- RBBM_STATUS (0x210), RBBM_INT_0_STATUS (0x201), CP_SQE_CNTL (0x808), CP_SQE_INSTR_BASE (0x830),
+  and one CP_SCRATCH_REG0 (0x883) write/readback/restore. SECVID_TRUST_CNTL is deliberately not read
+  (the core is in secure mode until the zap runs).
+- the OOB stays held for the next rung.
+Also: sweetgx/sweetmx now DEFAULT to 2/2 (the cmd-db vote for the 180 MHz boot level is gfx idx 2,
+mx idx 2), so the boot-args are no longer needed.
+TEST: ARGS='sweetgpu=18'. Expect the same five acks, then "gpu OOB ACKNOWLEDGED ... PWR_ON" and
+"THE ADRENO 618 3D CORE IS POWERED AND ANSWERING".

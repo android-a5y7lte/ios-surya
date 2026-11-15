@@ -2515,3 +2515,42 @@ ios-extra, marnov999/ios26-sweet - mostly forks/mirrors of ios-sweet or UniXNU; 
 - PERF_TBL id 4 (gx_levels, 2 cx levels, then {vote, khz} pairs), BW_VOTE_TBL id 3 (bw_level_num 1,
   rest zero), TEST id 5. Sequence numbers continue 3, 4, 5 after MSG_INIT's 1 and FW_VER's 2.
 Runs automatically after the handshake: same ARGS='sweetgpu=11'.
+
+## ***** a6xx_gmu_hfi_start COMPLETE (2026-11-15 20:28) - THE GMU HALF OF THE GPU IS DONE *****
+`ARGS='sweetgpu=11'`, run 43745340057. Five messages, every one err=0, intr 0x00000001 throughout
+(MSGQ only, never CM3_FAULT), q1 advancing 4 -> 8 -> 12 -> 16 -> 20:
+  190: MSG_INIT      (seq 1) ack hdr=0x0002047e dw2=0x00000000 dw3=0x0e550e55
+  194: FW_VER        (seq 2) ack hdr=0x0012047e err=0 ver=0x10080000 -> 1.8 step 0
+  221: PERF_TBL      (seq 3) ack hdr=0x0022047e err=0 q1[8->12]
+  222: BW_VOTE_TBL   (seq 4) ack hdr=0x0032047e err=0 q1[12->16]
+  223: TEST          (seq 5) ack hdr=0x0042047e err=0 q1[16->20]
+  224: *** a6xx_gmu_hfi_start COMPLETE ... Next: core OOB + the CP ladder ***
+The votes, computed from the live fuse bin 0xa7 and the cmd-db levels, and ACCEPTED by the firmware:
+  gfx.lvl full list: 0 16 64 128 192 256 320 384 416  (9 levels; mx.lvl 0 16 192 320 384;
+                                                       cx.lvl 0 16 64 128 192 256 384)
+  GX 0: 0 MHz   VLVL 0   -> 0x00000000 (gfx 0, mx 0)
+  GX 1: 180 MHz VLVL 48  -> 0x00400202 (gfx 2, mx 2)   <- 48 is absent from gfx.lvl and correctly
+  GX 2: 267 MHz VLVL 64  -> 0x00400202 (gfx 2, mx 2)      resolves to the COVERING index 2 (VLVL 64)
+  GX 3: 355 MHz VLVL 128 -> 0x00800203 (gfx 3, mx 2)
+  GX 4: 430 MHz VLVL 192 -> 0x00c00204 (gfx 4, mx 2)
+  GX 5: 565 MHz VLVL 256 -> 0x01000305 (gfx 5, mx 3)
+  GX 6: 650 MHz VLVL 320 -> 0x01400306 (gfx 6, mx 3)
+  GX 7: 800 MHz VLVL 384 -> 0x01800407 (gfx 7, mx 4)
+  CX 0: 0 MHz VLVL 0 -> 0x00000000 ; CX 1: 200 MHz VLVL 48 -> 0x00400202
+Confirms for good: v1 perf table is {vote, khz} PAIRS (not the v2 {vote, acd, khz} triple);
+bw_level_num=1 with everything else zero is accepted; ARC_VOTE = vlvl<<16 | sec<<8 | pri.
+
+### WHERE THE GPU STANDS
+DONE: clocks, CX power, SMMU alive, GMU fw -> TCM, GMU boots (0xbabeface), GMU SMMU context
+(CB0/ASID1, s2cr 0x300), HFI queue table, HFI_CTRL_INIT acked (0x1), cmd-db parsed, and the whole
+five-message a6xx_gmu_hfi_start. The GX rail + SPTPRAC (0130) also work, though HFI does not need them.
+NEXT, in order:
+1. core OOB - and it is NOT the boot_slumber OOB that 0130 uses. From yavuzhanozyer/hakios-xnu-kernel
+   (a6xx_gmu_oob_set): GMU_CORE_REQUEST = bit 30 of host2gmu_intr_set, GMU_CORE_GRANTED = bit 31 of
+   gmu2host_intr_info. Then the 3D core's registers can be read - RBBM_STATUS is the first real sign.
+2. the 3D core's own SMMU context + ring buffer + SQE microcode (a630_sqe.fw, already pulled to
+   research/fw/vendor/). mxt's 0093-0098 are the reference; their CP ROQ reads 0 is where THEY are stuck.
+3. zap shader: a615_zap.mdt straight through to PAS_INIT_IMAGE (mdt == b00+b01, no hand-built
+   metadata), with the GPU powered this time - the earlier -3145797 was sdm845's a630_zap.mbn sent
+   with the core unpowered.
+4. CP_SET_SECURE_MODE 0, CP first command, first submit.

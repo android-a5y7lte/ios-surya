@@ -1,0 +1,397 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 0d5f99c..d6c1ba6 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -767,6 +767,8 @@ to_memory(vm_offset_t start, vm_size_t size)
+  * work, factored out so G4d-c can reuse it). Returns whether the hypervisor took the
+  * stream match (the context is then live); *buffers_out is the kernel VA of the GMU
+  * buffer block (page GMU_HFI_PAGE0 begins the HFI region). */
++static vm_offset_t gmu_tables_kva;      /* L1/L2/L3a/L3b of the GMU context; the CP shares L1/L2 */
++
+ static bool
+ gmu_build_context(vm_offset_t *buffers_out)
+ {
+@@ -812,6 +814,7 @@ gmu_build_context(vm_offset_t *buffers_out)
+ 		    (unsigned long long)kvtophys(buffers), (unsigned long long)bufsz);
+ 	}
+ 	*buffers_out = buffers;
++	gmu_tables_kva = tables;
+ 
+ 	uint64_t *l1  = (uint64_t *)(tables + 0x0000u);
+ 	uint64_t *l2  = (uint64_t *)(tables + 0x1000u);
+@@ -1350,6 +1353,367 @@ sweet_gpu_g5b_dcvs_read(void)
+ 	return true;
+ }
+ 
++/*
++ * G6-b: the command processor. The 3D core is powered and answering (G6-a); this gives it
++ * what it needs to execute its first packet, following edi194/ios-fajita's working a630
++ * ladder (their 0141/0143/0144/0145) with the a618 differences from mainline a6xx_hw_init:
++ *   1. memory: a ring (32 KiB at GPU VA 0x40000000), the SQE microcode (read-only, at
++ *      0x40010000) and a scratch page (0x40020000), behind the 3D core's OWN SMMU context:
++ *      context bank 1, ASID 2, stream id 0 (gfx3d_user) in stream-match slot 0. The context
++ *      shares the GMU's L1/L2 tables (0x40000000 and 0x60000000 both have VA[31:30] == 1)
++ *      and adds one L3 table under L2[0].
++ *   2. the subset of hw_init a first packet needs: 64-bit address modes, GBIF (a618 has
++ *      GBIF where a630 has VBIF), UCHE ranges, ROQ thresholds, ring and SQE base. SQE_CNTL
++ *      stays at its cold 0 throughout - mxt halted it with 3 first and then could not get
++ *      ROQ_THRESHOLDS_2 to read back; fajita configures at 0 and it works.
++ *   3. CP_SQE_CNTL = 1, then CP_ME_INIT (8 payload dwords) on the ring, WPTR moved, RPTR
++ *      polled. RPTR == WPTR == 9 means the CP fetched the packet THROUGH context bank 1,
++ *      executed it and retired it. Completion is polled; no interrupt is unmasked.
++ * Readbacks are printed but only the ring/SQE base and RB_CNTL gate the start: mxt's stuck
++ * ROQ readback must not be allowed to stop a core that might execute perfectly well.
++ * The SQE microcode comes in as a payload blob "SqeFW" (the phone's own a630_sqe.fw,
++ * tools/surya-test4.sh). Its first dword is a version header that Linux strips
++ * (adreno_fw_create_bo: data + 4), and so do we.
++ * sweetcp=0 skips this whole stage.
++ */
++#define CP_SMMU_CTX             1u
++#define CP_SMMU_ASID            2u
++#define CP_SMMU_STREAM          0u          /* gfx3d_user */
++#define CP_SMMU_MATCH           0u          /* stream-match slot 0, kept free for exactly this */
++#define CP_VA_RING              0x40000000u
++#define CP_VA_SQE               0x40010000u
++#define CP_VA_SCRATCH           0x40020000u
++#define CP_BLK_L3               0x00000u
++#define CP_BLK_RING             0x01000u
++#define CP_RING_BYTES           0x08000u
++#define CP_BLK_SQE              0x09000u
++#define CP_SQE_BYTES            0x08000u
++#define CP_BLK_SCRATCH          0x11000u
++#define CP_BLK_BYTES            0x12000u
++#define PTE_READ_ONLY           (1ull << 7)
++#define A6XX_RBBM_GBIF_CLIENT_QOS_CNTL  0x0011u
++#define A6XX_RBBM_GBIF_HALT             0x0016u
++#define A6XX_RBBM_INTERFACE_HANG_INT_CNTL 0x001fu
++#define A6XX_RBBM_PERFCTR_GPU_BUSY_MASKED 0x050bu
++#define A6XX_CP_RB_BASE         0x0800u
++#define A6XX_CP_RB_CNTL         0x0802u
++#define A6XX_CP_RB_RPTR_ADDR    0x0804u
++#define A6XX_CP_RB_RPTR         0x0806u
++#define A6XX_CP_RB_WPTR         0x0807u
++#define A6XX_CP_SQE_CNTL_W      0x0808u
++#define A6XX_CP_HW_FAULT        0x0821u
++#define A6XX_CP_INTERRUPT_STATUS 0x0823u
++#define A6XX_CP_PROTECT_STATUS  0x0824u
++#define A6XX_CP_STATUS_1        0x0825u
++#define A6XX_CP_SQE_INSTR_BASE_W 0x0830u
++#define A6XX_CP_ADDR_MODE_CNTL  0x0842u
++#define A6XX_CP_ROQ_THRESHOLDS_1 0x08c1u
++#define A6XX_CP_ROQ_THRESHOLDS_2 0x08c2u
++#define A6XX_CP_MEM_POOL_SIZE   0x08c3u
++#define A6XX_CP_AHB_CNTL        0x098du
++#define A6XX_VSC_ADDR_MODE_CNTL 0x0c01u
++#define A6XX_UCHE_ADDR_MODE_CNTL 0x0e00u
++#define A6XX_UCHE_WRITE_RANGE_MAX 0x0e05u
++#define A6XX_UCHE_WRITE_THRU_BASE 0x0e07u
++#define A6XX_UCHE_TRAP_BASE     0x0e09u
++#define A6XX_UCHE_GMEM_RANGE_MIN 0x0e0bu
++#define A6XX_UCHE_GMEM_RANGE_MAX 0x0e0du
++#define A6XX_UCHE_CACHE_WAYS    0x0e17u
++#define A6XX_UCHE_FILTER_CNTL   0x0e18u
++#define A6XX_UCHE_CLIENT_PF     0x0e19u
++#define A6XX_GBIF_HALT_W        0x3c45u
++#define A6XX_GRAS_ADDR_MODE_CNTL 0x8601u
++#define A6XX_RB_ADDR_MODE_CNTL  0x8e05u
++#define A6XX_VPC_ADDR_MODE_CNTL 0x9601u
++#define A6XX_PC_DBG_ECO_CNTL    0x9e00u
++#define A6XX_PC_ADDR_MODE_CNTL  0x9e01u
++#define A6XX_VFD_ADDR_MODE_CNTL 0xa601u
++#define A6XX_SP_ADDR_MODE_CNTL  0xae01u
++#define A6XX_TPL1_ADDR_MODE_CNTL 0xb601u
++#define A6XX_HLSQ_ADDR_MODE_CNTL 0xbe05u
++#define CP_RB_CNTL_VALUE        ((1u << 27) | (2u << 8) | 12u)  /* no rptr update, 32 KiB */
++#define CP_ME_INIT_OP           72u
++
++static vm_offset_t cp_block_kva;        /* L3 + ring + SQE + scratch */
++static uint32_t cp_wptr;                /* dwords written into the ring */
++
++static uint32_t
++cp_rd(vm_offset_t core, uint32_t word)
++{
++	return rd(core, 4u * word);
++}
++
++static void
++cp_wr(vm_offset_t core, uint32_t word, uint32_t val)
++{
++	wr(core, 4u * word, val);
++}
++
++static void
++cp_wr64(vm_offset_t core, uint32_t word, uint64_t val)
++{
++	cp_wr(core, word, (uint32_t)val);
++	cp_wr(core, word + 1u, (uint32_t)(val >> 32));
++}
++
++/* PM4 type-7 header: one parity bit for the count and one for the opcode */
++static uint32_t
++pm4_parity(uint32_t v)
++{
++	return (0x9669u >> (0xfu & (v ^ (v >> 4) ^ (v >> 8) ^ (v >> 12) ^
++	    (v >> 16) ^ (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1u;
++}
++
++static uint32_t
++pm4_pkt7(uint32_t opcode, uint32_t cnt)
++{
++	return 0x70000000u | cnt | (pm4_parity(cnt) << 15) |
++	    ((opcode & 0x7fu) << 16) | (pm4_parity(opcode) << 23);
++}
++
++static void
++cp_emit(uint32_t v)
++{
++	*(volatile uint32_t *)(cp_block_kva + CP_BLK_RING + 4u * cp_wptr) = v;
++	cp_wptr = (cp_wptr + 1u) % (CP_RING_BYTES / 4u);
++}
++
++static bool
++cp_wait_idle(vm_offset_t core, const char *what)
++{
++	for (int i = 0; i < 20000; i++) {
++		if (cp_rd(core, A6XX_CP_RB_RPTR) == cp_wptr) {
++			printf("SWEET GPU: G6-b %s: ring idle (RPTR=WPTR=%u) rbbm_status=0x%08x cp_status1=0x%08x\n",
++			    what, cp_wptr, cp_rd(core, 0x0210u), cp_rd(core, A6XX_CP_STATUS_1));
++			return true;
++		}
++		IODelay(100);
++	}
++	printf("SWEET GPU: G6-b %s: ring did NOT drain in 2 s: rptr=%u wptr=%u rbbm_status=0x%08x cp_status1=0x%08x"
++	    " hw_fault=0x%08x cp_irq=0x%08x protect=0x%08x rbbm_irq=0x%08x\n",
++	    what, cp_rd(core, A6XX_CP_RB_RPTR), cp_wptr, cp_rd(core, 0x0210u),
++	    cp_rd(core, A6XX_CP_STATUS_1), cp_rd(core, A6XX_CP_HW_FAULT),
++	    cp_rd(core, A6XX_CP_INTERRUPT_STATUS), cp_rd(core, A6XX_CP_PROTECT_STATUS),
++	    cp_rd(core, 0x0201u));
++	return false;
++}
++
++/* 1. memory + the 3D core's SMMU context. false = do not start the CP. */
++static bool
++cp_memory_and_context(void)
++{
++	if (gmu_tables_kva == 0) {
++		printf("SWEET GPU: G6-b no GMU page tables to share; CP stage skipped\n");
++		return false;
++	}
++	/* the microcode, from the payload */
++	DTEntry mm;
++	uintptr_t const *reg = NULL;
++	unsigned int sz = 0;
++	if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &mm) != kSuccess ||
++	    SecureDTGetProperty(mm, "SqeFW", (void const **)&reg, &sz) != kSuccess ||
++	    sz < 2 * sizeof(uintptr_t)) {
++		printf("SWEET GPU: G6-b no \"SqeFW\" blob in the payload - the CP cannot fetch without"
++		    " its microcode; stage skipped (tools/surya-test4.sh adds it from research/fw/vendor/a630_sqe.fw)\n");
++		return false;
++	}
++	uint64_t fwpa = reg[0], fwsz = reg[1];
++	const uint8_t *fw = (const uint8_t *)ml_static_ptovirt((vm_offset_t)fwpa);
++	if (fw == NULL || fwsz < 16u || fwsz - 4u > CP_SQE_BYTES) {
++		printf("SWEET GPU: G6-b SqeFW blob pa=0x%llx size=0x%llx is not usable\n", fwpa, fwsz);
++		return false;
++	}
++
++	kern_return_t kr = kmem_alloc(kernel_map, &cp_block_kva, round_page((vm_size_t)CP_BLK_BYTES),
++	    (kma_flags_t)(KMA_KOBJECT | KMA_ZERO | KMA_DATA), VM_KERN_MEMORY_IOKIT);
++	if (kr != KERN_SUCCESS) {
++		printf("SWEET GPU: G6-b no memory for the CP block (%d)\n", kr);
++		return false;
++	}
++	/* write-combining in place, exactly as the GMU buffers (never ml_io_map managed RAM) */
++	for (vm_size_t off = 0; off < round_page((vm_size_t)CP_BLK_BYTES); off += PAGE_SIZE) {
++		pmap_set_cache_attributes((ppnum_t)(kvtophys(cp_block_kva + off) >> PAGE_SHIFT),
++		    SURYA_VM_WIMG_WCOMB);
++	}
++	/* microcode without its 4-byte version header */
++	const uint32_t *code = (const uint32_t *)(fw + 4);
++	uint32_t ncode = (uint32_t)((fwsz - 4u) / 4u);
++	volatile uint32_t *sqe = (volatile uint32_t *)(cp_block_kva + CP_BLK_SQE);
++	for (uint32_t i = 0; i < ncode; i++) {
++		sqe[i] = code[i];
++	}
++	printf("SWEET GPU: G6-b SQE microcode: blob pa=0x%llx %llu bytes, header 0x%08x stripped, %u dwords: %08x %08x %08x\n",
++	    fwpa, fwsz, *(const uint32_t *)fw, ncode, sqe[0], sqe[1], sqe[2]);
++
++	/* tables: the CP's L3 under the shared L2[0] */
++	uint64_t *l1 = (uint64_t *)(gmu_tables_kva + 0x0000u);
++	uint64_t *l2 = (uint64_t *)(gmu_tables_kva + 0x1000u);
++	uint64_t *l3 = (uint64_t *)(cp_block_kva + CP_BLK_L3);
++	for (uint32_t k = 0; k < CP_RING_BYTES / SMMU_GRANULE; k++) {
++		l3[((CP_VA_RING >> 12) & 0x1ffu) + k] =
++		    kvtophys(cp_block_kva + CP_BLK_RING + (vm_offset_t)k * SMMU_GRANULE) | PTE_GMU | PTE_PAGE;
++	}
++	for (uint32_t k = 0; k < CP_SQE_BYTES / SMMU_GRANULE; k++) {
++		l3[((CP_VA_SQE >> 12) & 0x1ffu) + k] =
++		    kvtophys(cp_block_kva + CP_BLK_SQE + (vm_offset_t)k * SMMU_GRANULE) | PTE_GMU | PTE_PAGE |
++		    PTE_READ_ONLY;
++	}
++	l3[(CP_VA_SCRATCH >> 12) & 0x1ffu] = kvtophys(cp_block_kva + CP_BLK_SCRATCH) | PTE_GMU | PTE_PAGE;
++	to_memory(cp_block_kva, round_page((vm_size_t)CP_BLK_BYTES));
++	l2[(CP_VA_RING >> 21) & 0x1ffu] = kvtophys((vm_offset_t)l3) | PTE_TABLE;
++	to_memory(gmu_tables_kva, PAGE_SIZE);
++
++	/* context bank 1, same tables, ASID 2; then stream id 0 -> bank 1 */
++	vm_offset_t s = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
++	uint32_t id1 = smmu_rd(s, SMMU_ID1);
++	uint32_t pgshift = (id1 & (1u << 31)) ? 16u : 12u;
++	uint32_t numpage = 1u << (((id1 >> 28) & 7u) + 1u);
++	uint32_t pgsize = 1u << pgshift;
++	vm_offset_t gr1 = s + pgsize;
++	vm_offset_t cb = s + (numpage << pgshift) + (vm_offset_t)CP_SMMU_CTX * pgsize;
++	uint64_t ttbr0 = kvtophys((vm_offset_t)l1) | ((uint64_t)CP_SMMU_ASID << 48);
++
++	uint32_t pre_sctlr = smmu_rd(cb, SMMU_CB_SCTLR), pre_smr = smmu_rd(s, SMMU_SMR0 + 4u * CP_SMMU_MATCH);
++	if ((pre_sctlr & 1u) != 0u || (pre_smr & SMMU_SMR_VALID) != 0u) {
++		printf("SWEET GPU: G6-b context bank 1 / stream slot 0 already in use (sctlr 0x%08x smr 0x%08x); not touching them\n",
++		    pre_sctlr, pre_smr);
++		return false;
++	}
++	smmu_wr(cb, SMMU_CB_SCTLR, 0);
++	smmu_wr(gr1, SMMU_CBA2R(0, CP_SMMU_CTX), SMMU_CBA2R_VA64);
++	smmu_wr(gr1, SMMU_CBAR(0, CP_SMMU_CTX), SMMU_CBAR_STAGE1);
++	smmu_wr(cb, SMMU_CB_TCR2, SMMU_TCR2_CFG);
++	smmu_wr(cb, SMMU_CB_TCR, SMMU_TCR_39BIT);
++	smmu_wr(cb, SMMU_CB_TTBR0_LO, (uint32_t)ttbr0);
++	smmu_wr(cb, SMMU_CB_TTBR0_HI, (uint32_t)(ttbr0 >> 32));
++	smmu_wr(cb, SMMU_CB_TTBR1_LO, 0);
++	smmu_wr(cb, SMMU_CB_TTBR1_LO + 4u, 0);
++	smmu_wr(cb, SMMU_CB_MAIR0, SMMU_MAIR0_CFG);
++	smmu_wr(cb, SMMU_CB_MAIR1, 0);
++	smmu_wr(cb, SMMU_CB_FSR, SMMU_FSR_FAULTS);
++	smmu_wr(cb, SMMU_CB_TLBIASID, CP_SMMU_ASID);
++	smmu_wr(cb, SMMU_CB_TLBSYNC, 1);
++	for (int i = 0; i < 500; i++) {
++		if ((smmu_rd(cb, SMMU_CB_TLBSTATUS) & 1u) == 0u) { break; }
++		IODelay(10);
++	}
++	smmu_wr(cb, SMMU_CB_SCTLR, SMMU_SCTLR_ON);
++	smmu_wr(s, SMMU_S2CR0 + 4u * CP_SMMU_MATCH, SMMU_S2CR_PRIV | CP_SMMU_CTX);
++	smmu_wr(s, SMMU_SMR0 + 4u * CP_SMMU_MATCH, SMMU_SMR_VALID | CP_SMMU_STREAM);
++
++	uint32_t smr = smmu_rd(s, SMMU_SMR0 + 4u * CP_SMMU_MATCH);
++	uint32_t s2cr = smmu_rd(s, SMMU_S2CR0 + 4u * CP_SMMU_MATCH);
++	uint32_t sctlr = smmu_rd(cb, SMMU_CB_SCTLR);
++	uint32_t tlo = smmu_rd(cb, SMMU_CB_TTBR0_LO), thi = smmu_rd(cb, SMMU_CB_TTBR0_HI);
++	bool ok = smr == (SMMU_SMR_VALID | CP_SMMU_STREAM) &&
++	    (s2cr & 0x303ffu) == (SMMU_S2CR_PRIV | CP_SMMU_CTX) && (sctlr & 1u) != 0u &&
++	    tlo == (uint32_t)ttbr0 && thi == (uint32_t)(ttbr0 >> 32);
++	printf("SWEET GPU: G6-b cp context: cb1 sctlr=0x%08x ttbr0=0x%08x%08x smr0=0x%08x s2cr0=0x%08x sGFSR=0x%08x -> %s\n",
++	    sctlr, thi, tlo, smr, s2cr, smmu_rd(s, SMMU_sGFSR), ok ? "took" : "DID NOT TAKE");
++	printf("SWEET GPU: G6-b cp memory: ring 0x%08x (32 KiB) sqe 0x%08x (read-only) scratch 0x%08x; block phys 0x%llx l2[0]=0x%llx\n",
++	    CP_VA_RING, CP_VA_SQE, CP_VA_SCRATCH, (uint64_t)kvtophys(cp_block_kva),
++	    (uint64_t)l2[(CP_VA_RING >> 21) & 0x1ffu]);
++	return ok;
++}
++
++static void
++sweet_gpu_g6b_cp(vm_offset_t core)
++{
++	static const uint32_t addr_mode[] = {
++		A6XX_CP_ADDR_MODE_CNTL, A6XX_VSC_ADDR_MODE_CNTL, A6XX_GRAS_ADDR_MODE_CNTL,
++		A6XX_RB_ADDR_MODE_CNTL, A6XX_PC_ADDR_MODE_CNTL, A6XX_HLSQ_ADDR_MODE_CNTL,
++		A6XX_VFD_ADDR_MODE_CNTL, A6XX_VPC_ADDR_MODE_CNTL, A6XX_UCHE_ADDR_MODE_CNTL,
++		A6XX_SP_ADDR_MODE_CNTL, A6XX_TPL1_ADDR_MODE_CNTL,
++	};
++	uint32_t enable = 1;
++	(void)PE_parse_boot_argn("sweetcp", &enable, sizeof(enable));
++	if (enable == 0u) {
++		printf("SWEET GPU: G6-b skipped (sweetcp=0)\n");
++		return;
++	}
++	printf("SWEET GPU: G6-b the command processor: memory, context, hw_init, SQE, CP_ME_INIT\n");
++	if (!cp_memory_and_context()) {
++		printf("SWEET GPU: G6-b stopped before touching the CP\n");
++		return;
++	}
++	printf("SWEET GPU: G6-b cp before configuration: sqe_cntl=0x%08x hw_fault=0x%08x cp_irq=0x%08x rptr=%u wptr=%u cp_status1=0x%08x\n",
++	    cp_rd(core, A6XX_CP_SQE_CNTL_W), cp_rd(core, A6XX_CP_HW_FAULT),
++	    cp_rd(core, A6XX_CP_INTERRUPT_STATUS), cp_rd(core, A6XX_CP_RB_RPTR),
++	    cp_rd(core, A6XX_CP_RB_WPTR), cp_rd(core, A6XX_CP_STATUS_1));
++
++	/* 2. hw_init subset, mainline a6xx_hw_init order, SQE_CNTL left at 0 */
++	cp_wr(core, A6XX_GBIF_HALT_W, 0);               /* a618 has GBIF: clear any halt */
++	cp_wr(core, A6XX_RBBM_GBIF_HALT, 0);
++	for (unsigned i = 0; i < sizeof(addr_mode) / sizeof(addr_mode[0]); i++) {
++		cp_wr(core, addr_mode[i], 1);           /* 64-bit addressing */
++	}
++	cp_wr(core, A6XX_RBBM_GBIF_CLIENT_QOS_CNTL, 3);
++	cp_wr(core, A6XX_RBBM_PERFCTR_GPU_BUSY_MASKED, 0xffffffffu);
++	cp_wr64(core, A6XX_UCHE_WRITE_RANGE_MAX, 0x0001ffffffffffc0ull);
++	cp_wr64(core, A6XX_UCHE_TRAP_BASE, 0x0001fffffffff000ull);
++	cp_wr64(core, A6XX_UCHE_WRITE_THRU_BASE, 0x0001fffffffff000ull);
++	cp_wr64(core, A6XX_UCHE_GMEM_RANGE_MIN, 0x100000u);
++	cp_wr64(core, A6XX_UCHE_GMEM_RANGE_MAX, 0x100000u + 0x80000u - 1u);  /* a618 gmem 512 KiB */
++	cp_wr(core, A6XX_UCHE_FILTER_CNTL, 0x804);
++	cp_wr(core, A6XX_UCHE_CACHE_WAYS, 0x4);
++	cp_wr(core, A6XX_CP_ROQ_THRESHOLDS_2, 0x010000c0);
++	cp_wr(core, A6XX_CP_ROQ_THRESHOLDS_1, 0x8040362c);
++	cp_wr(core, A6XX_CP_MEM_POOL_SIZE, 128);
++	cp_wr(core, A6XX_PC_DBG_ECO_CNTL, 0x00180000);
++	cp_wr(core, A6XX_CP_AHB_CNTL, 1);
++	cp_wr(core, A6XX_RBBM_INTERFACE_HANG_INT_CNTL, (1u << 30) | 0x1fffffu);
++	cp_wr(core, A6XX_UCHE_CLIENT_PF, (1u << 7) | 1u);
++	cp_wr64(core, A6XX_CP_SQE_INSTR_BASE_W, CP_VA_SQE);
++	cp_wr64(core, A6XX_CP_RB_BASE, CP_VA_RING);
++	cp_wr(core, A6XX_CP_RB_CNTL, CP_RB_CNTL_VALUE);
++	cp_wr64(core, A6XX_CP_RB_RPTR_ADDR, CP_VA_SCRATCH);
++	__asm__ volatile ("dsb sy" ::: "memory");
++
++	uint32_t cntl = cp_rd(core, A6XX_CP_RB_CNTL), sqeb = cp_rd(core, A6XX_CP_SQE_INSTR_BASE_W);
++	uint32_t rbb = cp_rd(core, A6XX_CP_RB_BASE);
++	printf("SWEET GPU: G6-b cp configured: rb_cntl=0x%08x sqe_base=0x%08x rb_base=0x%08x roq2=0x%08x roq1=0x%08x"
++	    " mem_pool=%u addr_mode=0x%x gbif_halt=0x%x\n",
++	    cntl, sqeb, rbb, cp_rd(core, A6XX_CP_ROQ_THRESHOLDS_2), cp_rd(core, A6XX_CP_ROQ_THRESHOLDS_1),
++	    cp_rd(core, A6XX_CP_MEM_POOL_SIZE), cp_rd(core, A6XX_CP_ADDR_MODE_CNTL),
++	    cp_rd(core, A6XX_GBIF_HALT_W));
++	if (cntl != CP_RB_CNTL_VALUE || sqeb != CP_VA_SQE || rbb != CP_VA_RING) {
++		printf("SWEET GPU: G6-b ring/SQE base readback mismatch - NOT starting the SQE\n");
++		return;
++	}
++
++	/* 3. start the SQE and give it CP_ME_INIT (mainline a6xx_cp_init) */
++	cp_wptr = 0;
++	cp_wr(core, A6XX_CP_SQE_CNTL_W, 1);
++	printf("SWEET GPU: G6-b SQE enabled: sqe_cntl=0x%08x cp_status1=0x%08x hw_fault=0x%08x\n",
++	    cp_rd(core, A6XX_CP_SQE_CNTL_W), cp_rd(core, A6XX_CP_STATUS_1), cp_rd(core, A6XX_CP_HW_FAULT));
++	cp_emit(pm4_pkt7(CP_ME_INIT_OP, 8));
++	cp_emit(0x0000002fu);
++	cp_emit(0x00000003u);           /* multiple hardware contexts */
++	cp_emit(0x20000000u);           /* error detection */
++	cp_emit(0);
++	cp_emit(0);
++	cp_emit(0);
++	cp_emit(0);
++	cp_emit(0);
++	to_memory(cp_block_kva + CP_BLK_RING, 64);
++	cp_wr(core, A6XX_CP_RB_WPTR, cp_wptr);
++	bool idle = cp_wait_idle(core, "CP_ME_INIT");
++
++	/* did the fetch go through context bank 1 cleanly? */
++	vm_offset_t s = ml_io_map(GPU_SMMU_PA, GPU_SMMU_SIZE);
++	uint32_t id1 = smmu_rd(s, SMMU_ID1);
++	uint32_t pgshift = (id1 & (1u << 31)) ? 16u : 12u;
++	uint32_t numpage = 1u << (((id1 >> 28) & 7u) + 1u);
++	vm_offset_t cb = s + (numpage << pgshift) + (vm_offset_t)CP_SMMU_CTX * (1u << pgshift);
++	uint32_t fsr = smmu_rd(cb, SMMU_CB_FSR);
++	printf("SWEET GPU: G6-b cb1 after the fetch: fsr=0x%08x far=0x%08x%08x fsynr0=0x%08x sGFSR=0x%08x (%s)\n",
++	    fsr, smmu_rd(cb, SMMU_CB_FAR_HI), smmu_rd(cb, SMMU_CB_FAR_LO), smmu_rd(cb, SMMU_CB_FSYNR0),
++	    smmu_rd(s, SMMU_sGFSR), (fsr & SMMU_FSR_FAULTS) ? "REAL FAULT BITS" : "no fault bits");
++	if (idle) {
++		printf("SWEET GPU: G6-b *** THE CP EXECUTED ITS FIRST PACKET - CP_ME_INIT fetched through CB1, run and retired. Next: zap, CP_SET_SECURE_MODE 0, NOP test ***\n");
++	}
++}
++
+ /*
+  * G6-a: the first touch of the 3D core. a6xx_gmu_hfi_start is complete, the GX rail was
+  * voted and SPTPRAC enabled before HFI (0130), so what remains of _adreno_start's power-up
+@@ -1420,6 +1784,7 @@ sweet_gpu_g6a_core_oob(vm_offset_t g)
+ 	    before, after, after == 0x5a5a1234u ? "THE 3D CORE TAKES WRITES" : "write did not stick");
+ 	if (after == 0x5a5a1234u) {
+ 		printf("SWEET GPU: G6-a *** THE ADRENO 618 3D CORE IS POWERED AND ANSWERING *** Next: CP memory, SQE, zap.\n");
++		sweet_gpu_g6b_cp(gpu);
+ 	}
+ }
+ 

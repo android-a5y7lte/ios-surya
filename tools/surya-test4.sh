@@ -70,6 +70,20 @@ if [ "$VARIANT" = 5 ]; then
 	else
 		echo "note: $ZAPFW missing (or SURYA_ZAPFW=0): GPU zap-shader TZ probe disabled" >&2
 	fi
+	# G6-b: the 3D core's command processor cannot fetch a packet without its SQE
+	# microcode. This is the phone's own /vendor/firmware/a630_sqe.fw (pulled 2026-11-14).
+	SQEFW=research/fw/vendor/a630_sqe.fw
+	if [ -f "$SQEFW" ]; then
+		BLOB+=(--blob "SqeFW=$SQEFW")
+	else
+		echo "note: $SQEFW missing: the GPU command processor stage (G6-b) will be skipped" >&2
+	fi
+	# The device-signed zap shader for the next rung: the .mdt is the PAS_INIT_IMAGE
+	# metadata as-is (mdt == b00 + b01), b02 is the one loadable segment.
+	for z in mdt b02; do
+		f=research/fw/vendor/a615_zap.$z
+		[ -f "$f" ] && BLOB+=(--blob "Zap${z^}=$f")
+	done
 	[ -f research/ipsw-x/d22ap.adt ] || echo "warning: research/ipsw-x/d22ap.adt missing: iOS will see an iPod with a Home button" >&2
 else
 	KEYSLOG='sweetkeys=0 sweetlog=0'

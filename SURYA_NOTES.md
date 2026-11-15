@@ -2594,3 +2594,29 @@ NEXT (mxt 0093-0098 and fajita 0146-0166 are the references; fajita first, it is
 2. a6xx_start-style core register setup with SQE still at cold zero.
 3. zap: a615_zap.mdt straight to PAS_INIT_IMAGE with the core powered, then MEM_SETUP/AUTH_AND_RESET.
 4. CP_SQE_CNTL=1, CP_ME_INIT, CP_SET_SECURE_MODE 0, first submit.
+
+### Patch 0151: G6-b - the command processor up to CP_ME_INIT (sweetgpu=18, sweetcp=0 to skip)
+Follows fajita's WORKING a630 ladder (their 0141 cpctx / 0143 cpmem / 0144 cphwinit / 0145 cpmeinit)
+with a618's differences from mainline a6xx_hw_init. Runs automatically after G6-a succeeds.
+1. Memory + context: one 0x12000 block (L3 table, 32 KiB ring, 32 KiB SQE, scratch page), write-
+   combining in place. GPU VAs as fajita/mxt: ring 0x40000000, SQE 0x40010000 (PTE read-only, bit 7),
+   scratch 0x40020000. The 3D core gets its OWN context: bank 1, ASID 2, stream id 0 (gfx3d_user) in
+   stream-match slot 0, S2CR PRIVCFG|1. It SHARES the GMU's L1/L2 (0x40000000 and 0x60000000 both
+   have VA[31:30]==1) and adds one L3 under L2[0]. Refuses to touch bank 1 / slot 0 if already in use.
+2. hw_init subset: GBIF_HALT/RBBM_GBIF_HALT 0 and RBBM_GBIF_CLIENT_QOS_CNTL 3 (a618 has GBIF where
+   a630 has VBIF - fajita's VBIF_GATE_OFF_WRREQ_EN is a630-only), eleven *_ADDR_MODE_CNTL = 1, UCHE
+   ranges (gmem 0x100000 + 512 KiB for a618), ROQ_THRESHOLDS_2 0x010000c0 / _1 0x8040362c,
+   MEM_POOL_SIZE 128, PC_DBG_ECO_CNTL 0x00180000, CP_AHB_CNTL 1, hang-int, UCHE_CLIENT_PF, then
+   SQE_INSTR_BASE, RB_BASE, RB_CNTL ((1<<27)|(2<<8)|12), RB_RPTR_ADDR.
+   SQE_CNTL STAYS AT ITS COLD 0 THROUGHOUT. mxt halted it with 3 first and then could not get ROQ2 to
+   read back (their 0094-0097; 0098, which removes the halt, was never booted). fajita configures at
+   0 and it works. Also: only ring/SQE base + RB_CNTL readbacks GATE the start; ROQ etc. are printed
+   but not allowed to stop a core that may execute fine.
+3. CP_SQE_CNTL = 1, CP_ME_INIT (opcode 72, 8 payload dwords: 0x2f, 3, 0x20000000, 0...) with PM4
+   type-7 parity, WPTR = 9, RPTR polled for 2 s. Then CB1's FSR/FAR are printed, so a fetch that
+   faults in the SMMU is visible as such. fajita's success line: "ring idle (RPTR=WPTR=9)", with
+   cp_status1 going 0xffffffff -> 0x81004000 on SQE enable.
+SQE microcode: payload blob "SqeFW" = research/fw/vendor/a630_sqe.fw (31980 B), first dword is a
+version header and is stripped as Linux does (adreno_fw_create_bo: data + 4).
+tools/surya-test4.sh now adds SqeFW, plus ZapMdt/ZapB02 (a615_zap.mdt / .b02) ready for the zap rung.
+JIMMY MUST `git pull` before the test or the blob will not be in the payload.

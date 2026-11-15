@@ -2430,3 +2430,35 @@ dbg_buffer_addr/size as 0 (KGSL permits it), so the dump-region question can sti
 same build if the padding fix is not enough.
 TEST: ARGS='sweetgpu=11' -> expect MSG_INIT ack, NO CM3_FAULT, then a FW_VER ack and
 "TWO MESSAGES ACKNOWLEDGED". If CM3_FAULT persists, retry with sweetnodbg=1 (no rebuild).
+
+## *** 0147 RESULT (2026-11-15 19:41): THE v1 HFI PROTOCOL IS RUNNING ***
+  188: G4d-e wrote GMU_INIT hdr=0x00100500 at q0[w=0], new write=5 (5 dwords, unpadded)
+  189: G4d-e intr_info=0x00000001 hfi_status=0x00000001 q1[r=0 w=4]      <- CM3_FAULT GONE
+  190: G4d-e q1 ack hdr=0x0002047e ... dw2=0x00000000 dw3=0x0e550e55     <- MSG_INIT, error 0
+  191: G4d-e drained q1: read advanced 0 -> 4
+  193: G4d-e FW_VER sent hdr=0x00200201 at q0[w=5]; q1[w=4->8] intr=0x00000001
+  194: G4d-e FW_VER ack hdr=0x0012047e ... err=0x00000000 ver=0x10080000 -> 1.8 step 0
+  195: G4d-e *** TWO MESSAGES ACKNOWLEDGED - the v1 HFI protocol is running ***
+THE PADDING WAS THE WHOLE REMAINING FAULT. intr_info went 0x00800001 -> 0x00000001: MSGQ only, no
+CM3_FAULT. Two messages, both error 0, queue indices advancing (q1 4 -> 8), firmware confirming 1.8
+step 0 over HFI. Four bugs in the HFI path were all ours: queue ids (0143), table size (0138),
+message ids + undrained q1 (0146), padded write index (0147).
+
+### Patch 0148: cmd-db ARC levels (G5-b, read-only)
+a6xx_gmu_hfi_start has three messages left - PERF_TBL (id 4), BW_VOTE_TBL (id 3), TEST (id 5) - and
+the perf table is built from RPMh ARC voltage levels for gfx.lvl / mx.lvl / cx.lvl. Those live in the
+cmd-db that firmware leaves in reserved RAM, which we had never read.
+Deliberately a MINIMAL reader: mxt's sweet_rpmh.c is 645 lines because it also drives the RSC/TCS rail
+machinery, and our own notes (line 1156) record that the GPU track does not need those rails - the GMU
+runs on the CX GDSC we already power. So we take the database only:
+  locator 0x0c3f000c -> pa at +0, size at +4; header version +0 (==1), magic +4 (0x0c0330db),
+  flags +140 (bit 0 clear); 8 slave headers at 8+16*i; 24-byte entries, addr +16, aux len +20,
+  aux off +22; ARC slave id 3 and (addr >> 16) must also be 3; levels are LE uint16 at aux + 2k.
+Also prints the speed bin from the live fuse against the OPP table. sweet (Redmi Note 10 Pro) is the
+SAME SM7150-AC / Adreno 618 as surya, and our own G1 read already put this device on bin 0xa7, which
+is in mxt's table: { 0xa7, 8, { 0, 180, 267, 355, 430, 565, 650, 800 } } - so the OPP ladder is
+probably reusable as-is, but it is printed and checked rather than trusted.
+Runs automatically after the handshake, so the same ARGS='sweetgpu=11' exercises it. Nothing is voted.
+READ: gfx.lvl should report addr 0x30050 (our notes line 1981: mxt's PDC gfx.lvl is 0x30050, not
+Linux's 0x30080), mx.lvl 0x30010 and cx.lvl 0x30000 - the last two are PDC TCS addresses patch 0124
+already programs. Levels are the VLVL corners the perf table needs.

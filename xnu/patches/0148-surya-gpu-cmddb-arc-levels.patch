@@ -1,0 +1,216 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 93503c1..1af7586 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1064,6 +1064,202 @@ gmu_gx_rail_sptprac(vm_offset_t g)
+ 	return on;
+ }
+ 
++/*
++ * G5-b: cmd-db ARC levels. The HFI protocol is running, so the next three messages of
++ * a6xx_gmu_hfi_start are PERF_TBL (id 4), BW_VOTE_TBL (id 3) and TEST (id 5), and the
++ * perf table is built from RPMh ARC voltage levels for gfx.lvl / mx.lvl / cx.lvl. Those
++ * live in the cmd-db that firmware leaves in reserved RAM; we have never read it.
++ *
++ * This is a MINIMAL reader on purpose. mxtpasontop's sweet_rpmh.c is 645 lines because it
++ * also drives the RSC/TCS rail machinery; our own notes record that the GPU track does
++ * not need those rails (the GMU runs on the CX GDSC we already power), so porting the
++ * whole client would be dead weight. All we need is the database:
++ *   locator at 0x0c3f000c -> cmd-db PA at +0, size at +4
++ *   header: version at +0 (must be 1), magic at +4 (0x0c0330db), flags at +140 (bit 0 clear)
++ *   8 slave headers at 8 + 16*i: slave id, entries offset, aux offset, entry count
++ *   entry (24 bytes): key[2], ..., addr at +16, aux len at +20, aux offset at +22
++ *   ARC slave id is 3, and the resource address must also report slave 3 in its top half
++ * Levels are little-endian uint16 at aux + 2*k. Read-only; nothing is voted here.
++ */
++#define CMDDB_LOCATOR_PA    0x0c3f000cu
++#define CMDDB_MAGIC         0x0c0330dbu
++#define CMDDB_HEADER        144u
++#define CMDDB_ENTRY         24u
++#define CMDDB_ARC           3u
++#define CMDDB_MAX           0x100000u
++#define GPU_MAX_LEVELS      16u
++
++static vm_offset_t cmddb_base;
++static uint32_t cmddb_size;
++
++static uint32_t
++cmddb_rd(uint32_t off)
++{
++	return *(volatile uint32_t *)(cmddb_base + off);
++}
++
++static uint16_t
++cmddb_rd16(uint32_t off)
++{
++	/* the database is byte-packed; avoid unaligned loads on Device memory */
++	return (uint16_t)(cmddb_rd(off & ~3u) >> (8u * (off & 3u)));
++}
++
++static bool
++cmddb_in_range(uint32_t off, uint32_t size)
++{
++	return off <= cmddb_size && size <= cmddb_size - off;
++}
++
++static bool
++cmddb_open(void)
++{
++	if (cmddb_base != 0) {
++		return true;
++	}
++	vm_offset_t loc = ml_io_map(CMDDB_LOCATOR_PA, 8);
++	if (loc == 0) {
++		printf("SWEET GPU: G5-b could not map the cmd-db locator at 0x%08x\n", CMDDB_LOCATOR_PA);
++		return false;
++	}
++	uint32_t pa = *(volatile uint32_t *)(loc + 0);
++	uint32_t size = *(volatile uint32_t *)(loc + 4);
++	printf("SWEET GPU: G5-b cmd-db locator 0x%08x -> pa=0x%08x size=0x%x\n",
++	    CMDDB_LOCATOR_PA, pa, size);
++	/* firmware supplies the address; never scan RAM looking for the magic */
++	if (pa < 0x80000000u || (pa & 3u) || (size & 3u) || size < CMDDB_HEADER ||
++	    size > CMDDB_MAX || (uint64_t)pa + size > 0x100000000ULL) {
++		printf("SWEET GPU: G5-b cmd-db locator is not plausible; refusing\n");
++		return false;
++	}
++	cmddb_base = ml_io_map(pa, size);
++	if (cmddb_base == 0) {
++		return false;
++	}
++	cmddb_size = size;
++	uint32_t ver = cmddb_rd(0), magic = cmddb_rd(4), flags = cmddb_rd(140);
++	printf("SWEET GPU: G5-b cmd-db version=0x%x magic=0x%08x checksum=0x%08x flags=0x%x\n",
++	    ver, magic, cmddb_rd(136), flags);
++	if (magic != CMDDB_MAGIC || ver != 1u || (flags & 1u) != 0u) {
++		printf("SWEET GPU: G5-b cmd-db magic/version/flags not supported; refusing\n");
++		cmddb_base = 0;
++		return false;
++	}
++	return true;
++}
++
++/* one ARC resource by name, e.g. "gfx.lvl". Returns false and explains on any problem. */
++static bool
++cmddb_arc_levels(const char *res, uint16_t *vals, unsigned max, unsigned *num, uint32_t *address)
++{
++	if (!cmddb_open()) {
++		return false;
++	}
++	uint32_t key[2] = { 0u, 0u };
++	for (unsigned i = 0; i < 8u && res[i] != '\0'; i++) {
++		key[i / 4u] |= (uint32_t)(uint8_t)res[i] << (8u * (i % 4u));
++	}
++	unsigned matches = 0, len = 0;
++	for (unsigned i = 0; i < 8u; i++) {
++		uint32_t h = 8u + 16u * i;
++		unsigned slave = cmddb_rd16(h);
++		if (slave == 0) {
++			break;
++		}
++		uint32_t entries = CMDDB_HEADER + cmddb_rd16(h + 2u);
++		uint32_t aux = CMDDB_HEADER + cmddb_rd16(h + 4u);
++		unsigned count = cmddb_rd16(h + 6u);
++		if (slave < 3u || slave > 5u || (entries & 3u) != 0u ||
++		    !cmddb_in_range(entries, count * CMDDB_ENTRY) || !cmddb_in_range(aux, 0)) {
++			printf("SWEET GPU: G5-b malformed cmd-db slave header %u\n", i);
++			return false;
++		}
++		for (unsigned j = 0; j < count; j++) {
++			uint32_t e = entries + CMDDB_ENTRY * j;
++			if (cmddb_rd(e) != key[0] || cmddb_rd(e + 4u) != key[1]) {
++				continue;
++			}
++			uint32_t addr = cmddb_rd(e + 16u), off = aux + cmddb_rd16(e + 22u);
++			len = cmddb_rd16(e + 20u);
++			if (slave != CMDDB_ARC || (addr >> 16) != CMDDB_ARC || (len & 1u) != 0u ||
++			    !cmddb_in_range(off, len)) {
++				printf("SWEET GPU: G5-b %s is not a well-formed ARC entry\n", res);
++				return false;
++			}
++			for (unsigned k = 0; k < max; k++) {
++				vals[k] = (k < len / 2u) ? cmddb_rd16(off + 2u * k) : 0u;
++			}
++			*address = addr;
++			matches++;
++		}
++	}
++	if (matches != 1u || len < 2u) {
++		printf("SWEET GPU: G5-b %s ARC lookup matches=%u len=%u; refusing\n", res, matches, len);
++		return false;
++	}
++	/* the level list is zero-terminated after the first entry */
++	unsigned limit = (len / 2u < max) ? (len / 2u) : max;
++	for (*num = 1u; *num < limit; (*num)++) {
++		if (vals[*num - 1u] != 0u && vals[*num] == 0u) {
++			break;
++		}
++	}
++	return true;
++}
++
++static void
++sweet_gpu_g5b_dcvs_read(void)
++{
++	static const char *const arcs[3] = { "gfx.lvl", "mx.lvl", "cx.lvl" };
++	/* sweet (Redmi Note 10 Pro) is the same SM7150-AC / Adreno 618 as surya, and our own
++	 * G1 fuse read already put this device on bin 0xa7, which is in mxt's table:
++	 * { 0xa7, 8, { 0, 180, 267, 355, 430, 565, 650, 800 } }. Printed here so the ladder
++	 * is checked against the live fuse rather than trusted. */
++	static const struct { uint32_t bin; unsigned n; uint16_t mhz[GPU_MAX_LEVELS]; } bins[] = {
++		{ 0x00u, 9u, { 0, 180, 267, 355, 430, 565, 650, 800, 825 } },
++		{ 0xacu, 9u, { 0, 180, 267, 355, 430, 565, 650, 800, 825 } },
++		{ 0x92u, 8u, { 0, 180, 267, 355, 430, 565, 650, 700 } },
++		{ 0x80u, 7u, { 0, 180, 267, 355, 430, 565, 610 } },
++		{ 0xa7u, 8u, { 0, 180, 267, 355, 430, 565, 650, 800 } },
++	};
++
++	printf("SWEET GPU: G5-b reading cmd-db ARC levels (read-only; no votes sent)\n");
++	vm_offset_t qf = ml_io_map(QFPROM_PA, QFPROM_SIZE);
++	uint32_t fuse = 0, bin = 0xffffffffu;
++	if (qf != 0) {
++		fuse = *(volatile uint32_t *)(qf + 0x41a0u);
++		bin = (fuse & 0x1fe00000u) >> 21;
++	}
++	unsigned b = 0;
++	while (b < sizeof(bins) / sizeof(bins[0]) && bins[b].bin != bin) {
++		b++;
++	}
++	if (b == sizeof(bins) / sizeof(bins[0])) {
++		printf("SWEET GPU: G5-b speed bin 0x%x (fuse 0x%08x) is NOT in the table - no OPP ladder\n",
++		    bin, fuse);
++	} else {
++		printf("SWEET GPU: G5-b speed bin 0x%x (fuse 0x%08x): %u levels, top %u MHz\n",
++		    bin, fuse, bins[b].n, bins[b].mhz[bins[b].n - 1u]);
++		for (unsigned i = 0; i < bins[b].n; i++) {
++			printf("SWEET GPU: G5-b   OPP %u: %u MHz\n", i, bins[b].mhz[i]);
++		}
++	}
++	for (unsigned a = 0; a < 3u; a++) {
++		uint16_t lvl[GPU_MAX_LEVELS];
++		unsigned n = 0;
++		uint32_t addr = 0;
++		if (!cmddb_arc_levels(arcs[a], lvl, GPU_MAX_LEVELS, &n, &addr)) {
++			continue;
++		}
++		/* patch 0124's PDC TCS commands use 0x30000, 0x30010 and 0x30090 */
++		printf("SWEET GPU: G5-b %s addr 0x%05x%s, %u levels: %u %u %u %u %u %u %u %u\n",
++		    arcs[a], addr,
++		    (addr == 0x30000u || addr == 0x30010u || addr == 0x30090u) ?
++		    " (a PDC TCS address we already use)" : " (NOT one of our PDC TCS addresses)",
++		    n, lvl[0], lvl[1], lvl[2], lvl[3], lvl[4], lvl[5], lvl[6], lvl[7]);
++	}
++}
++
+ static void
+ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ {
+@@ -1613,6 +1809,8 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 			    q1_data[prev_q1w + 2u], a3, a3 >> 28, (a3 >> 16) & 0xfffu, a3 & 0xffffu);
+ 			printf("SWEET GPU: %s *** TWO MESSAGES ACKNOWLEDGED - the v1 HFI protocol is running ***\n",
+ 			    stage_label);
++			/* the protocol works, so gather what PERF_TBL/BW_VOTE_TBL need next */
++			sweet_gpu_g5b_dcvs_read();
+ 		} else {
+ 			printf("SWEET GPU: %s FW_VER got no answer; MSG_INIT acked but the protocol stops there\n",
+ 			    stage_label);

@@ -2462,3 +2462,56 @@ Runs automatically after the handshake, so the same ARGS='sweetgpu=11' exercises
 READ: gfx.lvl should report addr 0x30050 (our notes line 1981: mxt's PDC gfx.lvl is 0x30050, not
 Linux's 0x30080), mx.lvl 0x30010 and cx.lvl 0x30000 - the last two are PDC TCS addresses patch 0124
 already programs. Levels are the VLVL corners the perf table needs.
+
+## 0148 RESULT (2026-11-15 20:06): cmd-db PARSED, first try
+  197: G5-b speed bin 0xa7 (fuse 0x14e68410): 8 levels, top 800 MHz
+  206: G5-b cmd-db locator 0x0c3f000c -> pa=0x85f20000 size=0x1078
+  207: G5-b cmd-db version=0x1 magic=0x0c0330db checksum=0x00000000 flags=0x0
+  208: G5-b gfx.lvl addr 0x30050 (NOT one of our PDC TCS addresses), 9 levels: 0 16 64 128 192 256 320 384
+  209: G5-b mx.lvl  addr 0x30010 (a PDC TCS address we already use), 5 levels: 0 16 192 320 384
+  210: G5-b cx.lvl  addr 0x30000 (a PDC TCS address we already use), 7 levels: 0 16 64 128 192 256 384
+gfx.lvl is 0x30050, exactly as the notes predicted (mxt's value, not Linux's 0x30080). gfx.lvl printing
+"NOT one of our PDC TCS addresses" is EXPECTED, not a bug: patch 0124's third TCS entry is 0x30090,
+which mxt also uses and labels "KGSL, unnamed". The OPP ladder from the live fuse matches mxt's bin
+0xa7 entry exactly, confirming sweet (Redmi Note 10 Pro) and surya are the same SM7150-AC / Adreno 618.
+NOTE: gfx.lvl has 9 levels but no VLVL 48 (the 180 MHz corner). That is fine - arc_vote_tbl takes the
+first primary index whose level COVERS the request, so 48 resolves to index 2 (VLVL 64).
+
+### REPO SWEEP 2026-11-15 (wider: discovery, not just known clones)
+Known clones unchanged: fajita main c8076bc / brg-port 67317a3, mxt gpu e3ca66d / main fbf3a9c.
+GitHub's API is gated in this session (403) and github.com web fetches rate-limit quickly, but
+`git clone` / `git ls-remote` through the git proxy work fine - use those.
+NEW, and the important one: *** yavuzhanozyer/hakios-xnu-kernel *** (main c82aa71, 2026-11-12, and a
+branch claude/poco-x3-nfc-updates-y09ml2 at the same commit) - ACTIVELY WORKING ON SURYA (wcn3990 WiFi
+through 2026-11-12) and it carries drivers/gpu/hakios.adreno.c, a COMPLETE staged Adreno 6xx ladder
+that ends at step 22, "commands a picture filled with three colours, and shows it on the panel":
+  16 starts the message queues (HFI)        17 the tables + power the 3D core, then read its registers
+  18 the 3D core's context, ring, SQE       19 TrustZone loads the zap shader
+  20 the core's registers, CP + first cmd   21 out of secure mode, write a word into a page of ours
+  22 a three-colour picture on the panel
+Their driver targets a660 (fw/a660_gmu.bin, speeds 315/450/550 MHz) so its HFI is v2 - their perf
+table is {vote, acd, khz} triples where ours is v1 {vote, khz} pairs - so mxt stays the reference for
+LAYOUT. But it independently confirms: HFI_PERF_TABLE == 4 (our id 4 is right); the vote encoding
+(their rail_vote: `rail[at] << 16 | with << 8 | at`, identical to mxt's ARC_VOTE); and that Linux gets
+by with only the "off" bandwidth vote (adreno_7c3_build_bw_table), so our bw_level_num=1 table with
+everything else zero is correct rather than a shortcut.
+BANK FOR AFTER THE TABLES: the core OOB is a DIFFERENT one from our 0130 boot_slumber OOB -
+GMU_CORE_REQUEST = bit 30 of host2gmu_intr_set, GMU_CORE_GRANTED = bit 31 of gmu2host_intr_info
+(a6xx_gmu_oob_set). Their CP offsets, for a GPU block base that differs from ours (0x03d00000 vs our
+0x5000000): RBBM_STATUS word 0x0210, RBBM_INT_0_STATUS 0x0201, RBBM_CLOCK_CNTL 0x00ae, CP_RB_BASE 0x0800.
+Other repos checked and NOT ahead: ssttnd/ios-a71 (Galaxy A71, same SM7150) has NO GPU work at all -
+"no GPU, everything drawn by the CPU at 20-30 fps", patches 0001-0069 with nothing GPU-related, though
+it does ship an a618_gmu.bin in the repo root worth version-comparing. DC28088/hackios-sweet,
+CrackerCat|zeroninevibedslop|dipa-studio/UniXNU-sweet, LMasterPiec3/ios-sweet, ersascape|dipa-studio/
+ios-extra, marnov999/ios26-sweet - mostly forks/mirrors of ios-sweet or UniXNU; not surveyed in depth.
+
+### Patch 0149: PERF_TBL + BW_VOTE_TBL + TEST - the rest of a6xx_gmu_hfi_start
+- gx_corners (MHz -> VLVL: 180/48 267/64 355/128 430/192 565/256 650/320 800/384 825/416), gx_vlvl(),
+  arc_vote_tbl() (ARC_VOTE(pri, sec, vlvl) = vlvl<<16 | sec<<8 | pri), votes built from the live fuse
+  bin and the cmd-db levels, all printed before anything is sent.
+- sweet_hfi_cmd(): one generic send+ack with the discipline 0146/0147 established - exactly n dwords,
+  write advanced by exactly n, ring, poll, then DRAIN q1 (read = write). Fails loudly on timeout, on a
+  non-zero error word, or if CM3_FAULT appears.
+- PERF_TBL id 4 (gx_levels, 2 cx levels, then {vote, khz} pairs), BW_VOTE_TBL id 3 (bw_level_num 1,
+  rest zero), TEST id 5. Sequence numbers continue 3, 4, 5 after MSG_INIT's 1 and FW_VER's 2.
+Runs automatically after the handshake: same ARGS='sweetgpu=11'.

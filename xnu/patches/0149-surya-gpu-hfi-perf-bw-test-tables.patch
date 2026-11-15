@@ -1,0 +1,243 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 1af7586..265c0b1 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1207,7 +1207,65 @@ cmddb_arc_levels(const char *res, uint16_t *vals, unsigned max, unsigned *num, u
+ 	return true;
+ }
+ 
+-static void
++/*
++ * gx_gfx3d rate_max per vdd_gx corner with that corner's RPMh VLVL, and KGSL's
++ * setup_volt_dependency_tbl. arc_vote_tbl does NOT need an exact VLVL match: it takes the
++ * first primary ARC index whose level COVERS the request, which matters here because
++ * surya's gfx.lvl reports 0 16 64 128 ... and has no 48 for the 180 MHz corner - that
++ * level resolves to index 2 (VLVL 64) and is correct.
++ */
++static const struct { uint16_t mhz, vlvl; } gx_corners[] = {
++	{ 180, 48 }, { 267, 64 }, { 355, 128 }, { 430, 192 },
++	{ 565, 256 }, { 650, 320 }, { 800, 384 }, { 825, 416 },
++};
++#define ARC_VOTE(pri, sec, vlvl) ((((vlvl) & 0xffffu) << 16) | (((sec) & 0xffu) << 8) | ((pri) & 0xffu))
++#define MAX_CX_LEVELS       4u
++#define PERF_TBL_DW         (3u + 2u * GPU_MAX_LEVELS + 2u * MAX_CX_LEVELS)
++#define BW_TBL_DW           (6u + 6u + 2u * 6u + 8u + GPU_MAX_LEVELS * 8u)
++
++static uint32_t gx_votes[GPU_MAX_LEVELS], gx_khz[GPU_MAX_LEVELS];
++static uint32_t cx_votes[MAX_CX_LEVELS], cx_khz[MAX_CX_LEVELS];
++static unsigned gx_levels;
++
++static unsigned
++gx_vlvl(unsigned mhz)
++{
++	if (mhz == 0u) {
++		return 0u;                  /* KGSL hardcodes VLVL 0 for the 0 Hz level */
++	}
++	for (unsigned i = 0; i < sizeof(gx_corners) / sizeof(gx_corners[0]); i++) {
++		if (mhz <= gx_corners[i].mhz) {
++			return gx_corners[i].vlvl;
++		}
++	}
++	return 0xffffu;
++}
++
++static bool
++arc_vote_tbl(const char *what, const uint16_t *pri, unsigned npri, const uint16_t *sec,
++    unsigned nsec, const unsigned *vlvl, unsigned n, uint32_t *votes)
++{
++	for (unsigned i = 0; i < n; i++) {
++		unsigned k = 0, j = 0;
++		while (k < npri && pri[k] < vlvl[i]) {
++			k++;
++		}
++		if (k == npri) {
++			printf("SWEET GPU: G5-b %s level %u: VLVL %u is above all %u ARC levels\n",
++			    what, i, vlvl[i], npri);
++			return false;
++		}
++		for (j = 0; j < nsec; j++) {
++			if (sec[j] >= pri[k] || j + 1u == nsec) {
++				break;
++			}
++		}
++		votes[i] = ARC_VOTE(k, (j == nsec) ? 0u : j, pri[k]);
++	}
++	return true;
++}
++
++static bool
+ sweet_gpu_g5b_dcvs_read(void)
+ {
+ 	static const char *const arcs[3] = { "gfx.lvl", "mx.lvl", "cx.lvl" };
+@@ -1237,6 +1295,7 @@ sweet_gpu_g5b_dcvs_read(void)
+ 	if (b == sizeof(bins) / sizeof(bins[0])) {
+ 		printf("SWEET GPU: G5-b speed bin 0x%x (fuse 0x%08x) is NOT in the table - no OPP ladder\n",
+ 		    bin, fuse);
++		return false;
+ 	} else {
+ 		printf("SWEET GPU: G5-b speed bin 0x%x (fuse 0x%08x): %u levels, top %u MHz\n",
+ 		    bin, fuse, bins[b].n, bins[b].mhz[bins[b].n - 1u]);
+@@ -1244,20 +1303,101 @@ sweet_gpu_g5b_dcvs_read(void)
+ 			printf("SWEET GPU: G5-b   OPP %u: %u MHz\n", i, bins[b].mhz[i]);
+ 		}
+ 	}
++	uint16_t lvl[3][GPU_MAX_LEVELS];
++	unsigned num[3] = { 0, 0, 0 };
+ 	for (unsigned a = 0; a < 3u; a++) {
+-		uint16_t lvl[GPU_MAX_LEVELS];
+-		unsigned n = 0;
+ 		uint32_t addr = 0;
+-		if (!cmddb_arc_levels(arcs[a], lvl, GPU_MAX_LEVELS, &n, &addr)) {
+-			continue;
++		if (!cmddb_arc_levels(arcs[a], lvl[a], GPU_MAX_LEVELS, &num[a], &addr)) {
++			return false;
+ 		}
+-		/* patch 0124's PDC TCS commands use 0x30000, 0x30010 and 0x30090 */
+-		printf("SWEET GPU: G5-b %s addr 0x%05x%s, %u levels: %u %u %u %u %u %u %u %u\n",
++		/* patch 0124's PDC TCS commands use 0x30000, 0x30010 and 0x30090; gfx.lvl is
++		 * 0x30050 and mxt labels 0x30090 "KGSL, unnamed", so that is expected. */
++		printf("SWEET GPU: G5-b %s addr 0x%05x%s, %u levels: %u %u %u %u %u %u %u %u %u %u %u %u\n",
+ 		    arcs[a], addr,
+ 		    (addr == 0x30000u || addr == 0x30010u || addr == 0x30090u) ?
+ 		    " (a PDC TCS address we already use)" : " (NOT one of our PDC TCS addresses)",
+-		    n, lvl[0], lvl[1], lvl[2], lvl[3], lvl[4], lvl[5], lvl[6], lvl[7]);
++		    num[a], lvl[a][0], lvl[a][1], lvl[a][2], lvl[a][3], lvl[a][4], lvl[a][5],
++		    lvl[a][6], lvl[a][7], lvl[a][8], lvl[a][9], lvl[a][10], lvl[a][11]);
++	}
++
++	/* KGSL's own values: the CX ladder is two levels, 0 and 200 MHz at VLVL 48. */
++	unsigned gx_vl[GPU_MAX_LEVELS];
++	unsigned cx_vl[MAX_CX_LEVELS] = { 0u, 48u, 0u, 0u };
++	unsigned nlev = bins[b].n;
++	for (unsigned i = 0; i < nlev; i++) {
++		gx_vl[i] = gx_vlvl(bins[b].mhz[i]);
++		gx_khz[i] = (uint32_t)bins[b].mhz[i] * 1000u;
++	}
++	cx_khz[0] = 0u;
++	cx_khz[1] = 200000u;
++	if (!arc_vote_tbl("GX", lvl[0], num[0], lvl[1], num[1], gx_vl, nlev, gx_votes) ||
++	    !arc_vote_tbl("CX", lvl[2], num[2], lvl[1], num[1], cx_vl, 2u, cx_votes)) {
++		return false;
++	}
++	for (unsigned i = 0; i < nlev; i++) {
++		printf("SWEET GPU: G5-b GX level %u: %u MHz VLVL %u -> vote 0x%08x (gfx idx %u, mx idx %u)\n",
++		    i, bins[b].mhz[i], gx_vl[i], gx_votes[i], gx_votes[i] & 0xffu,
++		    (gx_votes[i] >> 8) & 0xffu);
+ 	}
++	for (unsigned i = 0; i < 2u; i++) {
++		printf("SWEET GPU: G5-b CX level %u: %u MHz VLVL %u -> vote 0x%08x\n",
++		    i, cx_khz[i] / 1000u, cx_vl[i], cx_votes[i]);
++	}
++	gx_levels = nlev;               /* only once every vote is valid */
++	return true;
++}
++
++/* KGSL's H2F ids; 0146 established that ours were wrong. INIT 0 and FW_VER 1 are sent
++ * inline in G4d-e, these three finish a6xx_gmu_hfi_start. */
++#define H2F_MSG_BW_VOTE_TBL_ID  0x03u
++#define H2F_MSG_PERF_TBL_ID     0x04u
++
++/*
++ * Send one message on q0 and wait for its ack on q1, with the queue discipline 0146 and 0147
++ * established: write EXACTLY n dwords, advance write by exactly n, ring, then drain q1 by
++ * setting read to write. Returns false and prints the reason on a timeout or an error word.
++ */
++static bool
++sweet_hfi_cmd(vm_offset_t g, volatile struct hfi_table *hfi_u, volatile uint32_t *q0_data,
++    volatile uint32_t *q1_data, const char *lbl, const char *name, const uint32_t *msg, uint32_t n)
++{
++	uint32_t w = hfi_u->queue[0].write;
++	uint32_t prev = hfi_u->queue[1].write;
++	for (uint32_t i = 0; i < n; i++) {
++		q0_data[w + i] = msg[i];
++	}
++	hfi_u->queue[0].write = w + n;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);
++	wr(g, GMU_HOST2GMU_INTR_SET, 1u);
++	uint32_t qw = prev, intr = 0;
++	for (int i = 0; i < 2000; i++) {
++		intr = rd(g, GMU_GMU2HOST_INTR_INFO);
++		qw = hfi_u->queue[1].write;
++		if (qw != prev) {
++			break;
++		}
++		IODelay(100);
++	}
++	if (qw == prev) {
++		printf("SWEET GPU: %s %s (%u dw at q0[w=%u]): NO ACK within ~200 ms, intr=0x%08x hfi_status=0x%08x\n",
++		    lbl, name, n, w, intr, rd(g, GMU_HFI_CTRL_STATUS));
++		return false;
++	}
++	uint32_t a0 = q1_data[prev], err = q1_data[prev + 2u];
++	hfi_u->queue[1].read = qw;       /* drain, or the GMU answers once and stops */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	printf("SWEET GPU: %s %s acked: hdr=0x%08x (id=0x%02x size=%u type=%u) err=0x%08x q1[%u->%u] intr=0x%08x\n",
++	    lbl, name, a0, a0 & 0xffu, (a0 >> 8) & 0xffu, (a0 >> 16) & 0xfu, err, prev, qw, intr);
++	if (err != 0u) {
++		printf("SWEET GPU: %s %s REJECTED with error 0x%08x\n", lbl, name, err);
++		return false;
++	}
++	if ((intr & (1u << 23)) != 0u) {
++		printf("SWEET GPU: %s %s acked but CM3_FAULT is set (intr 0x%08x)\n", lbl, name, intr);
++		return false;
++	}
++	return true;
+ }
+ 
+ static void
+@@ -1810,7 +1950,53 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 			printf("SWEET GPU: %s *** TWO MESSAGES ACKNOWLEDGED - the v1 HFI protocol is running ***\n",
+ 			    stage_label);
+ 			/* the protocol works, so gather what PERF_TBL/BW_VOTE_TBL need next */
+-			sweet_gpu_g5b_dcvs_read();
++			if (sweet_gpu_g5b_dcvs_read()) {
++				/*
++				 * G5-c: the last three messages of a6xx_gmu_hfi_start.
++				 * PERF_TBL (id 4) carries the GX/CX vote+kHz pairs; BW_VOTE_TBL
++				 * (id 3) needs only the "off" level (Linux's
++				 * adreno_7c3_build_bw_table gets by with exactly that, which
++				 * yavuzhanozyer/hakios-xnu-kernel notes independently); TEST
++				 * (id 5) closes the sequence. v1 pairs are {vote, khz} - the
++				 * {vote, acd, khz} triple is the v2 layout and not ours.
++				 */
++				static uint32_t m[BW_TBL_DW > PERF_TBL_DW ? BW_TBL_DW : PERF_TBL_DW];
++				uint32_t seqn = 3u;
++				for (uint32_t i = 0; i < PERF_TBL_DW; i++) {
++					m[i] = 0u;
++				}
++				m[0] = H2F_MSG_PERF_TBL_ID | (PERF_TBL_DW << 8) | (seqn << 20);
++				m[1] = gx_levels;
++				m[2] = 2u;
++				for (unsigned i = 0; i < gx_levels; i++) {
++					m[3u + 2u * i] = gx_votes[i];
++					m[4u + 2u * i] = gx_khz[i];
++				}
++				for (unsigned i = 0; i < 2u; i++) {
++					m[3u + 2u * GPU_MAX_LEVELS + 2u * i] = cx_votes[i];
++					m[4u + 2u * GPU_MAX_LEVELS + 2u * i] = cx_khz[i];
++				}
++				if (sweet_hfi_cmd(g, hfi_u, q0_data, q1_data, stage_label,
++				    "H2F_MSG_PERF_TBL", m, PERF_TBL_DW)) {
++					for (uint32_t i = 0; i < BW_TBL_DW; i++) {
++						m[i] = 0u;
++					}
++					seqn++;
++					m[0] = H2F_MSG_BW_VOTE_TBL_ID | (BW_TBL_DW << 8) | (seqn << 20);
++					m[1] = 1u;      /* bw_level_num; cnoc/ddr cmds and wait masks 0 */
++					if (sweet_hfi_cmd(g, hfi_u, q0_data, q1_data, stage_label,
++					    "H2F_MSG_BW_VOTE_TBL", m, BW_TBL_DW)) {
++						seqn++;
++						m[0] = H2F_MSG_TEST_ID | (2u << 8) | (seqn << 20);
++						m[1] = 0u;
++						if (sweet_hfi_cmd(g, hfi_u, q0_data, q1_data,
++						    stage_label, "H2F_MSG_TEST", m, 2u)) {
++							printf("SWEET GPU: %s *** a6xx_gmu_hfi_start COMPLETE - PERF_TBL, BW_VOTE_TBL and TEST all acknowledged. Next: core OOB + the CP ladder ***\n",
++							    stage_label);
++						}
++					}
++				}
++			}
+ 		} else {
+ 			printf("SWEET GPU: %s FW_VER got no answer; MSG_INIT acked but the protocol stops there\n",
+ 			    stage_label);

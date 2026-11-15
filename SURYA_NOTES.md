@@ -2406,3 +2406,27 @@ Index maths all look right on paper (l2 idx (iova>>21)&0x1ff: 0x100 for l3a, 0x1
    every GMU buffer lives in l3a (needs the 1 MiB slot layout to change, GMU_IOVA_DUMP/LOG -> e.g.
    0x60120000 / 0x60130000).
 3. Add a readback of the l3b PTEs next to the existing G4d-ctx readback so this is observable.
+
+### Patch 0147: STOP PADDING THE HFI MESSAGES (and the l3b theory was wrong)
+First, the l3b lead from last night does NOT hold up: the page tables are correct on paper. L1[1]
+covers 0x40000000-0x7fffffff; within it l2[0x100] -> l3a covers 0x60000000-0x601fffff and l2[0x101]
+-> l3b covers 0x60200000-0x603fffff, and the l3 indices come out 0 (dummy), 0x100 (HFI) in l3a and
+0 (dump), 0x100 (log) in l3b, all right. The log reading "0 of 1024" is most likely just the firmware
+having no reason to log yet, not a broken mapping. Dropped.
+
+THE REAL BUG - OUR OWN PADDING. We wrote a 5-dword MSG_INIT and then advanced the write index by 8,
+filling q0[5..7] with 0xfafafafa, commented "pad to 4-dword slot boundary (HakiOS/vendor)". That was
+an assumption and there is no padding anywhere in the protocol. mxt's hfi_write, straight from KGSL:
+    for (i = 0; i < n; i++) { gm_wr(base + 4*wr, msg[i]); wr = (wr + 1) % HFI_QUEUE_DW; }
+    gm_wr(hfi_qh(q, QH_WRITE_INDEX), wr);
+- exactly n dwords, write index = n. With write 3 dwords past the message the GMU reads our 5 dwords,
+advances read to 5, sees read != write, and parses q0[5] = 0xfafafafa as the next HEADER: size field
+0xfa = 250 dwords of garbage. A malformed message immediately after a valid one, which is precisely
+the symptom: correct ack with error 0, CM3_FAULT in the SAME poll, nothing answered afterwards.
+mxt's receiver carries the matching guard ("bad message 0x%08x at %u; queue dropped"); the GMU
+firmware faults instead of skipping.
+0147 advances write by exactly 5 (MSG_INIT) and exactly 2 (FW_VER). Also adds `sweetnodbg=1` to send
+dbg_buffer_addr/size as 0 (KGSL permits it), so the dump-region question can still be A/B'd on the
+same build if the padding fix is not enough.
+TEST: ARGS='sweetgpu=11' -> expect MSG_INIT ack, NO CM3_FAULT, then a FW_VER ack and
+"TWO MESSAGES ACKNOWLEDGED". If CM3_FAULT persists, retry with sweetnodbg=1 (no rebuild).

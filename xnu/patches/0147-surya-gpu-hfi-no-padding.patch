@@ -1,0 +1,57 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 18dda57..93503c1 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1511,18 +1511,32 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 	uint32_t w0 = hfi_u->queue[0].write;
+ 	uint32_t seq = 1u;
+ 	uint32_t hdr = send_id | (5u << 8) | (0u << 16) | (seq << 20); /* id|size=5|type=CMD|seq=1 */
++	/*
++	 * DO NOT PAD. We were writing a 5-dword message and advancing write by 8, filling
++	 * the gap with 0xfafafafa "to a 4-dword slot boundary (HakiOS/vendor)" - an
++	 * assumption, and a damaging one. mxt's hfi_write (straight from KGSL) writes
++	 * exactly n dwords and sets WRITE_INDEX to wr after n increments; there is no
++	 * padding anywhere in the protocol. With write 3 dwords past the message, the GMU
++	 * reads our 5 dwords, advances its read index to 5, sees read != write, and parses
++	 * q0[5] = 0xfafafafa as the NEXT header - size field 0xfa, 250 dwords of garbage.
++	 * That is a malformed message arriving immediately after a valid one, which is
++	 * exactly the behaviour we have: a correct ack with error 0, CM3_FAULT set in the
++	 * same poll, and nothing answered afterwards. mxt's own receiver has the matching
++	 * guard ("bad message 0x%08x at %u; queue dropped"); the firmware faults instead.
++	 */
++	uint32_t nodbg = 0;
++	(void)PE_parse_boot_argn("sweetnodbg", &nodbg, sizeof(nodbg));
+ 	q0_data[w0 + 0u] = hdr;
+ 	q0_data[w0 + 1u] = 0u;                  /* seg_id */
+-	q0_data[w0 + 2u] = GMU_IOVA_DUMP;       /* dbg_buffer_addr - was 0, i.e. iova 0 */
+-	q0_data[w0 + 3u] = GMU_BUF_DUMP_SZ;     /* dbg_buffer_size - was 0 */
+-	q0_data[w0 + 4u] = 1u;                  /* boot_state = GMU_COLD_BOOT (was 0) */
+-	q0_data[w0 + 5u] = 0xfafafafau;    /* pad to 4-dword slot boundary (HakiOS/vendor) */
+-	q0_data[w0 + 6u] = 0xfafafafau;
+-	q0_data[w0 + 7u] = 0xfafafafau;
+-	hfi_u->queue[0].write = w0 + 8u;   /* advance by PADDED length */
++	/* dbg_buffer_addr/size: KGSL permits 0 for "no debug buffer". Kept switchable
++	 * because the dump region is the one GMU buffer we have never seen it touch. */
++	q0_data[w0 + 2u] = nodbg ? 0u : GMU_IOVA_DUMP;
++	q0_data[w0 + 3u] = nodbg ? 0u : GMU_BUF_DUMP_SZ;
++	q0_data[w0 + 4u] = 1u;                  /* boot_state = GMU_COLD_BOOT */
++	hfi_u->queue[0].write = w0 + 5u;        /* EXACTLY the message length */
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+-	printf("SWEET GPU: %s wrote %s hdr=0x%08x at q0[w=%u], new write=%u (padded 5->8 dwords)\n",
+-	    stage_label, send_name, hdr, w0, w0 + 8u);
++	printf("SWEET GPU: %s wrote %s hdr=0x%08x at q0[w=%u], new write=%u (5 dwords, unpadded)%s\n",
++	    stage_label, send_name, hdr, w0, w0 + 5u, nodbg ? " [dbg_buffer=0]" : "");
+ 
+ 	/* ring the GMU: bit 0 of HOST2GMU_INTR_SET = "message waiting for you" */
+ 	wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);  /* clear any stale latch */
+@@ -1578,9 +1592,7 @@ sweet_gpu_g4d_hfi(int stage) /* 0=G4d-c, 1=+G4d-d, 2=+G4d-e */
+ 		uint32_t vhdr = H2F_MSG_FW_VER_ID | (2u << 8) | (0u << 16) | (2u << 20);
+ 		q0_data[w1 + 0u] = vhdr;
+ 		q0_data[w1 + 1u] = 0x10080000u;     /* the version we support: 1.8, as mxt sends */
+-		q0_data[w1 + 2u] = 0xfafafafau;
+-		q0_data[w1 + 3u] = 0xfafafafau;
+-		hfi_u->queue[0].write = w1 + 4u;
++		hfi_u->queue[0].write = w1 + 2u;    /* EXACTLY 2 dwords, no padding */
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+ 		uint32_t prev_q1w = q1_w;
+ 		wr(g, GMU_GMU2HOST_INTR_CLR, 0xffffffffu);

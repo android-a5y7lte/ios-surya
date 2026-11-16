@@ -2658,3 +2658,18 @@ cast from `const uint8_t*` to `const uint32_t*`; the blob is page-aligned so the
 EXPECTED NEXT LOG: `CP_ME_INIT: ring idle (RPTR=WPTR=9) rbbm_status=0x1`. After that: the zap shader
 (ZapMdt + ZapB02 are already in the payload), CP_SET_SECURE_MODE 0, then a NOP + CP_MEM_WRITE +
 CP_EVENT_WRITE(CACHE_FLUSH_TS) first submit.
+
+### Patch 0152: PTE_CP sets AP[1] - the one-bit fix 0151's fault pointed at
+Three changes, all minimal:
+1. New PTE_CP = PTE_GMU | (1 << 6), used for the ring, SQE (+ PTE_READ_ONLY), and scratch L3 entries.
+   bit 6 is AP[1]: without it, AP[2:1]=10 ("EL1 only"); with it and bit 7 for RO, 0b11 ("RO, both EL")
+   - matches fajita's working GPU_PTE_PAGE exactly for a CP that successfully fetches through CB1.
+2. PTE_GMU is LEFT ALONE: the GMU's accesses arrive privileged, so AP[2:1]=00 is enough, and widening
+   something that already works risks nothing but adds no value.
+3. The two cast-alignment warnings 0151 emitted are gone: __builtin_memcpy into a uint32_t for the
+   stripped header, and word-by-word through memcpy for the microcode copy. The blob is still
+   page-aligned, so this is cosmetic; it just stops the compiler nagging.
+EXPECTED NEXT LOG: `G6-b CP_ME_INIT: ring idle (RPTR=WPTR=9)`, then `*** THE CP EXECUTED ITS FIRST
+PACKET ***`. If the ring still does not drain, cb1's FSR/FAR print the next suspect; if it does, the
+zap rung's inputs (ZapMdt + ZapB02, both already in the payload since 0151) are ready for the next
+patch.

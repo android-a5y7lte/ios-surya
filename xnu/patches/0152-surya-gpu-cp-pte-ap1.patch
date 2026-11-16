@@ -1,0 +1,63 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index d6c1ba6..7395df2 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -652,6 +652,15 @@ sweet_gpu_g4d_smmu_probe(void)
+ #define PTE_ACCESSED        (1ull << 10)
+ #define PTE_NOT_GLOBAL      (1ull << 11)
+ #define PTE_GMU             (PTE_SHARED | PTE_ACCESSED | PTE_NOT_GLOBAL) /* GMU accesses: privileged, uncached */
++/* The 3D core's SMMU context sees transactions as UNPRIVILEGED. Bit 6 is AP[1] in the
++ * VMSA stage-1 page descriptor: with AP[2]=0 and AP[1]=1 it reads as R/W at both EL0 and
++ * EL1; with the read-only bit (AP[2], bit 7) added on top, as RO at both. Without it,
++ * AP[2:1] = 10 means "EL1 only", and the SQE's instruction fetch is denied by the SMMU -
++ * which is exactly what 0151 ran into: `cb1 fsr=0x408 far=0x40010000`, Permission Fault
++ * at CP_VA_SQE. The GMU side keeps PTE_GMU (its accesses arrive privileged, so AP[2:1]=00
++ * is enough), so widening is only done where it was proven necessary. fajita's working
++ * GPU_PTE_PAGE sets the same bit for the a630 CP. */
++#define PTE_CP              (PTE_GMU | (1ull << 6))
+ /* the GMU's view (mainline a6xx_gmu) */
+ /* mxtpasontop/ios-sweet, the working a618/SM7150 port, puts the GMU on context bank 0
+  * (GMU_CB 0, GMU_ASID GMU_CB+1 == 1) and the 3D core on bank 1 (CP_CB 1, CP_ASID 2); its
+@@ -1535,15 +1544,20 @@ cp_memory_and_context(void)
+ 		pmap_set_cache_attributes((ppnum_t)(kvtophys(cp_block_kva + off) >> PAGE_SHIFT),
+ 		    SURYA_VM_WIMG_WCOMB);
+ 	}
+-	/* microcode without its 4-byte version header */
+-	const uint32_t *code = (const uint32_t *)(fw + 4);
++	/* microcode without its 4-byte version header. memcpy keeps the compiler quiet
++	 * about alignment (the blob IS page-aligned, so the casts are safe, but the warning
++	 * is noise). adreno_fw_create_bo in Linux drops the first 4 bytes the same way. */
++	uint32_t header = 0;
++	__builtin_memcpy(&header, fw, 4);
+ 	uint32_t ncode = (uint32_t)((fwsz - 4u) / 4u);
+ 	volatile uint32_t *sqe = (volatile uint32_t *)(cp_block_kva + CP_BLK_SQE);
+ 	for (uint32_t i = 0; i < ncode; i++) {
+-		sqe[i] = code[i];
++		uint32_t w = 0;
++		__builtin_memcpy(&w, fw + 4u + 4u * i, 4);
++		sqe[i] = w;
+ 	}
+ 	printf("SWEET GPU: G6-b SQE microcode: blob pa=0x%llx %llu bytes, header 0x%08x stripped, %u dwords: %08x %08x %08x\n",
+-	    fwpa, fwsz, *(const uint32_t *)fw, ncode, sqe[0], sqe[1], sqe[2]);
++	    fwpa, fwsz, header, ncode, sqe[0], sqe[1], sqe[2]);
+ 
+ 	/* tables: the CP's L3 under the shared L2[0] */
+ 	uint64_t *l1 = (uint64_t *)(gmu_tables_kva + 0x0000u);
+@@ -1551,14 +1565,14 @@ cp_memory_and_context(void)
+ 	uint64_t *l3 = (uint64_t *)(cp_block_kva + CP_BLK_L3);
+ 	for (uint32_t k = 0; k < CP_RING_BYTES / SMMU_GRANULE; k++) {
+ 		l3[((CP_VA_RING >> 12) & 0x1ffu) + k] =
+-		    kvtophys(cp_block_kva + CP_BLK_RING + (vm_offset_t)k * SMMU_GRANULE) | PTE_GMU | PTE_PAGE;
++		    kvtophys(cp_block_kva + CP_BLK_RING + (vm_offset_t)k * SMMU_GRANULE) | PTE_CP | PTE_PAGE;
+ 	}
+ 	for (uint32_t k = 0; k < CP_SQE_BYTES / SMMU_GRANULE; k++) {
+ 		l3[((CP_VA_SQE >> 12) & 0x1ffu) + k] =
+-		    kvtophys(cp_block_kva + CP_BLK_SQE + (vm_offset_t)k * SMMU_GRANULE) | PTE_GMU | PTE_PAGE |
++		    kvtophys(cp_block_kva + CP_BLK_SQE + (vm_offset_t)k * SMMU_GRANULE) | PTE_CP | PTE_PAGE |
+ 		    PTE_READ_ONLY;
+ 	}
+-	l3[(CP_VA_SCRATCH >> 12) & 0x1ffu] = kvtophys(cp_block_kva + CP_BLK_SCRATCH) | PTE_GMU | PTE_PAGE;
++	l3[(CP_VA_SCRATCH >> 12) & 0x1ffu] = kvtophys(cp_block_kva + CP_BLK_SCRATCH) | PTE_CP | PTE_PAGE;
+ 	to_memory(cp_block_kva, round_page((vm_size_t)CP_BLK_BYTES));
+ 	l2[(CP_VA_RING >> 21) & 0x1ffu] = kvtophys((vm_offset_t)l3) | PTE_TABLE;
+ 	to_memory(gmu_tables_kva, PAGE_SIZE);

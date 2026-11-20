@@ -2706,3 +2706,36 @@ CBAR type that matters, not the PTE.
 bank's CBAR write ONLY. GMU is left on TYPE=1 - it works (walks the same set of tables day in day
 out) and widening what works risks nothing it doesn't already accept.
 EXPECTED: fsr=0x400 (FORMAT only, no fault bits), ring draining to RPTR=WPTR=9.
+
+### 0153 RESULT: STALLED THE AHB - setting CBAR bit 17 hangs XNU before any G6-b log output
+Boot with sweetgpu=18 did not reach SWEET FB (phone stuck on the POCO splash). Boot with
+`sweetgpu=18 sweetcp=0` reaches iOS normally and logs read "G6-b skipped (sweetcp=0)". So the hang
+is specifically the CBAR write we added, and whatever TYPE=3 means on fajita's a630 SMMU, surya's
+a618 SMMU does NOT accept the same encoding - writing bit 17 to CBAR stalls the AHB before any
+following printf can run.
+
+### Patch 0154: revert the CBAR write back to SMMU_CBAR_STAGE1
+Changed one line back; kept the define SMMU_CBAR_CP_STAGE1_UNSAFE as a breadcrumb so the mistake is
+not re-tried. 0152's PF-at-SQE-leaf fault is BACK but XNU does not hang; we can test again.
+
+### WHERE THE REAL 0152 FAULT LIVES
+Three facts to anchor the next attempt rather than guess at another "obvious" fix:
+1. PTE for the SQE pages reads 0xEC3 (PTE_PAGE | PTE_CP | PTE_READ_ONLY) - AP[2:1] == 11
+   ("RO, both EL readable"). Bit-identical to fajita's working GPU_PTE_PAGE | (1<<7).
+2. CBAR TYPE=1 (SMMU_CBAR_STAGE1 == 0x1F300) is what the GMU context also uses and the GMU accesses
+   succeed through it. So TYPE=1 is not inherently broken; it's whether the leaf-level AP evaluates
+   correctly in this context.
+3. fsynr0 = 0x3 reads bit 5 = 0 ("unprivileged"), bit 4 = 0 ("read"), bits [2:0] = 3 (PLVL 3, leaf).
+   fajita's working CP has the SAME privilege encoding (their a630 SMMU reports PnU=0 on CP reads
+   per their notes), so unprivileged read is normal for the CP and not the problem.
+SUSPECTS TO TEST ONE AT A TIME (small patches, sweetcp=0 as a safety net each time):
+  a. the Linux a6xx driver sets `sctlr |= ARM_SMMU_SCTLR_HUPCF` for the GPU context; our SCTLR is
+     0x1027 and does NOT set bit 8 (HUPCF). Without HUPCF an upstream fault on a nested path may
+     be the "PF at leaf" we see.
+  b. SMMU_TCR2_CFG sets PA size=4 (36-bit PA) via (1 | 1<<4 | 7<<15). Our PA is above 4 GiB
+     routinely (block phys 0x104070000). 36-bit covers it, but a stricter TCR2 PA size might refuse.
+  c. SCTLR bit 12 is set in our SMMU_SCTLR_ON (= AFFD | ...? need to verify) - AFFD could swallow
+     the AF update. Unlikely but printed for completeness.
+  d. S2CR for CP writes PRIV | CP_SMMU_CTX. PRIV is (3<<8); on arm-smmu Linux PRIVCFG==3 is
+     "PRIV" (force privileged). fsynr0 says PnU=0 (unprivileged) on the fault. PRIVCFG may not
+     apply the way we assume - test S2CR = CP_SMMU_CTX only (no PRIVCFG) and see.

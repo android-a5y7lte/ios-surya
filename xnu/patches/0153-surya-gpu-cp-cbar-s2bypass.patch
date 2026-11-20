@@ -1,0 +1,27 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 7395df2..2c6ac7e 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -639,6 +639,13 @@ sweet_gpu_g4d_smmu_probe(void)
+ #define SMMU_CB_TLBSTATUS   0x07f4u
+ #define SMMU_SMR_VALID      (1u << 31)
+ #define SMMU_CBAR_STAGE1    (1u<<16 | 3u<<8 | 0xfu<<12)  /* stage-1, weakest defaults: our tables decide */
++/* The CP context needs TYPE=3 (S1 with S2 bypass) rather than TYPE=1 (nested). 0152 showed the
++ * SQE's instruction fetch getting a Permission Fault at CB1 even with the PTE's AP[1] set
++ * (fsynr0=0x3 said PLVL=3, PnU=0: unprivileged read at leaf) - AP[2:1]=11 should allow it, so the
++ * check above the leaf was the real failure. edi194/ios-fajita's working a630 CP uses
++ * (1<<17 | 1<<16 | 3<<8) = 0x30300, TYPE=3. The GMU keeps TYPE=1 because its own path works and
++ * widening what works risks nothing it doesn't already accept. */
++#define SMMU_CBAR_CP_STAGE1 (1u<<17 | 1u<<16 | 3u<<8)   /* TYPE=3: S1 with S2 bypass, fajita's value */
+ #define SMMU_CBA2R_VA64     1u
+ #define SMMU_SCTLR_ON       (1u<<0 | 1u<<1 | 1u<<2 | 1u<<5 | 1u<<12) /* M on, faults recorded, no interrupt */
+ #define SMMU_TCR_39BIT      (25u | 1u<<8 | 1u<<10 | 3u<<12 | 1u<<23) /* 39-bit VA, one table of 4K, cached walks */
+@@ -1595,7 +1602,7 @@ cp_memory_and_context(void)
+ 	}
+ 	smmu_wr(cb, SMMU_CB_SCTLR, 0);
+ 	smmu_wr(gr1, SMMU_CBA2R(0, CP_SMMU_CTX), SMMU_CBA2R_VA64);
+-	smmu_wr(gr1, SMMU_CBAR(0, CP_SMMU_CTX), SMMU_CBAR_STAGE1);
++	smmu_wr(gr1, SMMU_CBAR(0, CP_SMMU_CTX), SMMU_CBAR_CP_STAGE1);
+ 	smmu_wr(cb, SMMU_CB_TCR2, SMMU_TCR2_CFG);
+ 	smmu_wr(cb, SMMU_CB_TCR, SMMU_TCR_39BIT);
+ 	smmu_wr(cb, SMMU_CB_TTBR0_LO, (uint32_t)ttbr0);

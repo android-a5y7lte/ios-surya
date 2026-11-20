@@ -2673,3 +2673,36 @@ EXPECTED NEXT LOG: `G6-b CP_ME_INIT: ring idle (RPTR=WPTR=9)`, then `*** THE CP 
 PACKET ***`. If the ring still does not drain, cb1's FSR/FAR print the next suspect; if it does, the
 zap rung's inputs (ZapMdt + ZapB02, both already in the payload since 0151) are ready for the next
 patch.
+
+### 0152 RESULT (2026-11-20 23:14): identical fault, so AP[1] wasn't the layer
+With PTE_CP (= PTE_GMU | (1<<6)) carrying AP[1]=1 on all CP pages:
+  245: cp context: cb1 sctlr=0x00001027 ttbr0=0x0002000104070000 smr0=0x80000000 s2cr0=0x301 sGFSR=0 -> took
+  249: SQE enabled: sqe_cntl=0x1 cp_status1=0x81004000
+  250: CP_ME_INIT: ring did NOT drain in 2 s: rptr=0 wptr=9 rbbm_status=0x00800005
+       cp_status1=0x81000006 hw_fault=0 cp_irq=0x00000080 protect=0 rbbm_irq=0
+  251: cb1 after the fetch: fsr=0x00000408 far=0x40010000 fsynr0=0x00000003 sGFSR=0 (REAL FAULT BITS)
+Bit-identical to 0151's fault - fsr, far, fsynr0 all the same. AP[1] was irrelevant.
+
+Decoding fsynr0=0x3 against the ARM SMMU v2 spec (CBn_FSYNR0):
+  bits [2:0] PLVL = 3    - fault at page-table LEAF (not an upper-level walk)
+  bit  [3]   BSU  = 0
+  bit  [4]   WnR  = 0    - read (as expected: the SQE is fetching)
+  bit  [5]   PnU  = 0    - UNPRIVILEGED read
+  bit  [6]   IND  = 0    - data access
+  bit  [7]   NSATTR = 0  - secure attribute ... hmm
+With AP[2:1]=11 ("read-only, both EL readable") an unprivileged read should succeed. That it does not
+says the AP bits aren't being honored, which points one layer up.
+
+### Patch 0153: CBAR TYPE 1 -> 3 (nested -> S1 with S2 bypass) on the CP's context only
+ARM SMMU v2 CBAR bits [17:16] = TYPE:
+   0 = stage-2 only
+   1 = Stage 1 + Stage 2 (nested translation)    <- what SMMU_CBAR_STAGE1 (= 0x1F300) selects
+   3 = Stage 1 with Stage 2 BYPASS               <- fajita's GPU_CBAR_S1 (= 0x30300) selects
+We never programmed a Stage 2 context; TYPE=1 makes the SMMU attempt a nested walk over whatever
+default Stage 2 state exists, and the leaf permission checks go through that extra layer. fajita's
+working CP uses TYPE=3 (S1 with S2 bypass) and reports the same AP[2:1]=11 as ours, so it is the
+CBAR type that matters, not the PTE.
+0153 adds SMMU_CBAR_CP_STAGE1 = (1<<17 | 1<<16 | 3<<8) = 0x30300 and uses it for the CP context
+bank's CBAR write ONLY. GMU is left on TYPE=1 - it works (walks the same set of tables day in day
+out) and widening what works risks nothing it doesn't already accept.
+EXPECTED: fsr=0x400 (FORMAT only, no fault bits), ring draining to RPTR=WPTR=9.

@@ -2914,3 +2914,21 @@ to DRAM, and the zap is authenticated. Natural next rungs:
    above, but needed before 3D rendering.
 4. **IOGraphicsFamily hookup.** The scratch-write test runs out of band; wiring the GPU into
    IOAccelerator / IOGraphicsFamily is what lets WindowServer and SpringBoard actually use it.
+
+### 2026-11-21 (same day): G8 PASSED - the CP pipeline keeps up
+Patch 0158 on build 44937910139, first try. After G7's "GPU IS LIVE" the kernel enqueues
+four NOP + CP_MEM_WRITE + CP_EVENT_WRITE(CACHE_FLUSH_TS) submits into the ring (44 dwords
+total, WPTR 22 -> 66), rings the doorbell exactly ONCE, and cp_wait_idle completes with all
+eight scratch slots holding their expected markers (0xdead000N / 0xcafe000N for N in 0..3).
+Log /tmp/gZ7.txt lines 288-294:
+  G8 enqueued 4 submits (ring 22 -> 66, 11 dwords each) and rang once
+  G8 slot 0: mem=0xdead0000 (OK) ts=0xcafe0000 (OK)
+  G8 slot 1: mem=0xdead0001 (OK) ts=0xcafe0001 (OK)
+  G8 slot 2: mem=0xdead0002 (OK) ts=0xcafe0002 (OK)
+  G8 slot 3: mem=0xdead0003 (OK) ts=0xcafe0003 (OK)
+  G8 ***** ALL 4 SUBMITS RETIRED IN ORDER - THE CP PIPELINE WORKS *****
+
+Nothing extra was needed - no new SMCs, no new register config. The CP from G6-b + the zap
+from G7 is already a fully functional PM4 processor as far as MEM_WRITE / CACHE_FLUSH_TS go.
+Next real rung is a6xx_hw_init (RBBM, UCHE, VBIF defaults) so we can issue 2D/3D state, not
+just scratch writes.

@@ -2845,3 +2845,72 @@ flags=0x8000007 but now detected relocatable; min_addr=0x5000, off = paddr - min
 copies to carveout+0 (not carveout+(huge-underflow)). This is only useful if 0155's missing
 PAS_SHUTDOWN POST is a logging artefact rather than a reset - the log confirmation above
 decides which way we go next.
+
+### ***** 2026-11-21: THE ADRENO 618 IS LIVE *****
+Patches 0156 + 0157 together + fixing the CI-artifact confusion (xnu-buildtree is just source
++ intermediates for local compiles, xnu-kernel is the actual kernel binary - we had been
+re-flashing the stale 0155 shim-boot img every attempt after 0155) produced a full G7 end-to-end
+on build 44933434291. Log /tmp/gZ6.txt lines 253-287:
+
+  G7 relocatable image, mem_size=4096 -> carve-out 0x97715000
+  G7 skipping PAS_SHUTDOWN - CP is live, initial shutdown resets the chip. Going straight to PAS_INIT_IMAGE.
+  B.4 smc 0xc2000201 (G7 PAS_INIT_IMAGE)                arginfo 0x82, args 0xd 0x97715000 0x0
+    >>> smc iter=0 x0=0xc2000201 x1=0x82 x2=0xd x3=0x97715000
+    <<< smc returned x0=0x1 (SCM_INTERRUPTED)
+    >>> smc iter=1 x0=0x1
+    <<< smc returned x0=0x1 (SCM_INTERRUPTED)
+    >>> smc iter=2 x0=0x1
+    <<< smc returned x0=0x0 (DONE)
+    -> rc=0 answer=0x0 (after 3 calls)
+  G7 PAS_INIT_IMAGE ACCEPTED
+  B.4 smc 0xc2000202 (G7 PAS_MEM_SETUP) arginfo 0x3, args 0xd 0x97715000 0x1000
+    -> rc=0 (after 1 call)
+  G7 PAS_MEM_SETUP ACCEPTED
+  G7 copied 1968 bytes of ZapB02 to carve-out+0x0            [relocatable path, off=0]
+  B.4 smc 0xc2000205 (G7 PAS_AUTH_AND_RESET) arginfo 0x1, args 0xd 0x0 0x0
+    -> rc=0 (after 1 call)
+  G7 *** TRUSTZONE AUTHENTICATED THE ZAP AND STARTED IT ***
+  G6-b CP_SET_SECURE_MODE 0: ring idle (RPTR=WPTR=11) rbbm_status=0x00c40005 cp_status1=0x81914000
+  G7 *** CP IS OUT OF SECURE MODE (ring 9 -> 11) ***
+  G6-b first submit (NOP + MEM_WRITE + CACHE_FLUSH_TS): ring idle (RPTR=WPTR=22) rbbm_status=0x00000001 cp_status1=0x01000000
+  G7 scratch after submit: mem=0x5ee70001 (want 0x5ee70001) ts=0x600d0001 (want 0x600d0001)
+  G7 ***** THE ADRENO 618 EXECUTED A REAL SUBMIT - THE GPU IS LIVE *****
+
+iOS reached the lock screen after ~6 s of black (zap + first submit), so from G6-b's CP_ME_INIT
+success on through the real PM4 submit all works without disturbing the rest of boot. Scratch
+page holds BOTH writes we asked the CP to do (MEM_WRITE 0x5ee70001, CACHE_FLUSH_TS 0x600d0001),
+so the CP is retiring packets AND the cache-flush-TS pipeline writes make it to DRAM.
+
+Resolved mysteries:
+- 0155's PAS_SHUTDOWN "missing POST line" was a TrustZone-triggered chip reset. With the CP
+  active (post CP_ME_INIT), TZ treats PAS_SHUTDOWN on an engine it's still responsible for as
+  a security violation and tears the SoC down. The earlier B.4 success at 2026-11-14 had the
+  GPU unpowered. Linux's msm_gpu drops the initial PAS_SHUTDOWN at startup for the same reason.
+- "fixed image" after flashing 0156/0157: CI artifact mix-up. 'xnu-buildtree' intentionally
+  excludes the kernel binary (--exclude='kernel.development.*' in .github/workflows/xnu.yml),
+  it's only meant for local re-compiles. The actual kernel is in the 'xnu-kernel' artifact
+  (dxb/fakeroot/System/Library/Kernels/). Every "flash" between the first 0155 success and the
+  G7 success booted the stale 0155 shim-boot-surya-test5-cpu6.img sitting in shim/out/,
+  because tools/surya-test4.sh errors on empty kernel path but doesn't clobber the img.
+
+PAS SMC call pattern worth documenting for future TZ work:
+- PAS_INIT_IMAGE is PREEMPTIBLE: expect 1-3 SCM_INTERRUPTED (x0=0x1) returns before the real
+  result. sweet_scm_verbose's retry loop handles it.
+- PAS_MEM_SETUP and PAS_AUTH_AND_RESET return on first try here.
+- All three used SCM_FAST | SCM_64 | SCM_SIP (function id 0xc2000xxx). The FAST bit is accepted;
+  no need for the preemptible-only retry sweet_tz_b3 added.
+
+### What's next after G7
+The CP retires PM4 packets end-to-end, the scratch page proves CACHE_FLUSH_TS actually drains
+to DRAM, and the zap is authenticated. Natural next rungs:
+1. **A real framebuffer clear.** Build a tiny command buffer: set the render target to the
+   surya framebuffer (we already have its physical address from the display bring-up), issue a
+   CP_REG_WRITE sequence to program the 2D/blit path, then a CP_EVENT_WRITE + CACHE_FLUSH_TS to
+   flush. Visible proof the GPU draws pixels, not just writes scratch.
+2. **Multiple ring submissions.** Submit several packets back-to-back and watch WPTR vs RPTR to
+   confirm the pipeline keeps up. No new TZ calls needed.
+3. **A6xx hardware init registers.** We skipped most of a6xx_hw_init (RBBM, UCHE, VBIF, etc.).
+   Mainline msm_gpu sets ~30 registers with safe defaults. Not strictly needed for the submit
+   above, but needed before 3D rendering.
+4. **IOGraphicsFamily hookup.** The scratch-write test runs out of band; wiring the GPU into
+   IOAccelerator / IOGraphicsFamily is what lets WindowServer and SpringBoard actually use it.

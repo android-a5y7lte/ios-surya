@@ -1,0 +1,265 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 884615e..b7b483c 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1641,6 +1641,8 @@ cp_memory_and_context(void)
+ 	return ok;
+ }
+ 
++static void sweet_gpu_g7_zap_and_submit(vm_offset_t core);
++
+ static void
+ sweet_gpu_g6b_cp(vm_offset_t core)
+ {
+@@ -1736,6 +1738,11 @@ sweet_gpu_g6b_cp(vm_offset_t core)
+ 	    smmu_rd(s, SMMU_sGFSR), (fsr & SMMU_FSR_FAULTS) ? "REAL FAULT BITS" : "no fault bits");
+ 	if (idle) {
+ 		printf("SWEET GPU: G6-b *** THE CP EXECUTED ITS FIRST PACKET - CP_ME_INIT fetched through CB1, run and retired. Next: zap, CP_SET_SECURE_MODE 0, NOP test ***\n");
++		int zap = 0;
++		(void)PE_parse_boot_argn("sweetzap", &zap, sizeof(zap));
++		if (zap != 0) {
++			sweet_gpu_g7_zap_and_submit(core);
++		}
+ 	}
+ }
+ 
+@@ -2973,6 +2980,239 @@ sweet_tz_b4_zap_carveout(void)
+ 	return false;
+ }
+ 
++/*
++ * G7: the zap shader through TrustZone, then CP_SET_SECURE_MODE 0, then a first PM4 submit.
++ * Runs only at sweetzap=1 (default 0). The whole stage is one-shot per boot: a failed step
++ * returns early and the next boot can try a different approach without state leaking.
++ *
++ * TZ sequence, after fajita's 0146 (gpu_zap_load) with surya-specific addresses:
++ *   PAS_SHUTDOWN(13)                         release anything Android left
++ *   copy ZapMdt bytes to the low-bank carve-out (0x97715000, 8 KiB)
++ *   PAS_INIT_IMAGE(13, carve_pa)             TZ reads the metadata, stores hashes internally
++ *   PAS_MEM_SETUP(13, carve_pa, mem_size)    TZ marks the carve-out as our zap region
++ *   copy ZapB02 bytes to carve_pa+offset     (offset from phdr[2].p_paddr - min_addr)
++ *   PAS_AUTH_AND_RESET(13)                   TZ hashes the segment, starts the zap on the core
++ *
++ * CP sequence (reusing cp_emit / cp_wait_idle from G6-b):
++ *   CP_SET_SECURE_MODE 0                     leave secure mode
++ *   NOP + CP_MEM_WRITE scratch + CP_EVENT_WRITE(CACHE_FLUSH_TS) seq
++ *                                            verify scratch page holds both markers
++ */
++#define SCM_PAS_MEM_SETUP_G7    SCM_CALL(2u, 2u)   /* PAS cmd 2: mark zap mem region */
++#define GPU_CP_NOP              16u
++#define GPU_CP_MEM_WRITE        61u
++#define GPU_CP_EVENT_WRITE      70u
++#define GPU_CP_SET_SECURE_MODE  102u
++#define GPU_CP_CACHE_FLUSH_TS   4u
++#define GPU_CP_EVENT_WRITE_IRQ  0x80000000u
++#define SCRATCH_MEMWR_OFF       0x100u
++#define SCRATCH_TS_OFF          0x110u
++#define MEMWR_VAL               0x5ee70001u
++#define SEQ_VAL                 0x600d0001u
++#define MDT_MAX_PHDRS           8u
++#define MDT_PT_LOAD             1u
++#define MDT_TYPE_MASK           (7u << 24)
++#define MDT_TYPE_HASH           (2u << 24)
++#define MDT_RELOCATABLE         (4u << 24)
++
++static inline uint32_t gpu_u32le(const uint8_t *p) {
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++static inline uint16_t gpu_u16le(const uint8_t *p) {
++	return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
++}
++
++static const uint8_t *
++sweet_blob(const char *name, uint64_t *size_out)
++{
++	DTEntry mm;
++	uintptr_t const *reg = NULL;
++	unsigned int sz = 0;
++	if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &mm) != kSuccess ||
++	    SecureDTGetProperty(mm, name, (void const **)&reg, &sz) != kSuccess ||
++	    sz < 2 * sizeof(uintptr_t)) {
++		return NULL;
++	}
++	*size_out = reg[1];
++	return (const uint8_t *)ml_static_ptovirt((vm_offset_t)reg[0]);
++}
++
++static void
++sweet_gpu_g7_zap_and_submit(vm_offset_t core)
++{
++	printf("SWEET GPU: G7 zap shader + CP_SET_SECURE_MODE 0 + first submit (sweetzap=1)\n");
++
++	uint64_t mdt_size = 0, b02_size = 0;
++	const uint8_t *mdt = sweet_blob("ZapMdt", &mdt_size);
++	const uint8_t *b02 = sweet_blob("ZapB02", &b02_size);
++	if (mdt == NULL || b02 == NULL) {
++		printf("SWEET GPU: G7 ZapMdt or ZapB02 blob missing; add them with tools/surya-test4.sh. Skipping.\n");
++		return;
++	}
++	if (mdt_size < 0x40u || mdt_size > SURYA_ZAP_CARVEOUT_SIZE) {
++		printf("SWEET GPU: G7 ZapMdt size 0x%llx not usable (need 0x40 .. 0x%x)\n",
++		    mdt_size, SURYA_ZAP_CARVEOUT_SIZE);
++		return;
++	}
++	printf("SWEET GPU: G7 ZapMdt %llu bytes at %p, ZapB02 %llu bytes at %p\n",
++	    mdt_size, mdt, b02_size, b02);
++	if (gpu_u32le(mdt) != 0x464c457fu || mdt[4] != 1 || mdt[5] != 1 || gpu_u16le(mdt + 42) != 32u) {
++		printf("SWEET GPU: G7 ZapMdt is not a 32-bit LE Qualcomm ELF; skipping\n");
++		return;
++	}
++	uint32_t phoff = gpu_u32le(mdt + 28);
++	unsigned phnum = gpu_u16le(mdt + 44);
++	if (phnum == 0 || phnum > MDT_MAX_PHDRS || phoff < 52u ||
++	    (uint64_t)phoff + 32u * phnum > mdt_size) {
++		printf("SWEET GPU: G7 ZapMdt phdr table malformed (phoff=0x%x phnum=%u)\n", phoff, phnum);
++		return;
++	}
++	uint64_t min_addr = ~0ull, max_addr = 0;
++	bool relocate = false;
++	int load_idx = -1;
++	for (unsigned i = 0; i < phnum; i++) {
++		const uint8_t *p = mdt + phoff + 32u * i;
++		uint32_t type = gpu_u32le(p), paddr = gpu_u32le(p + 12);
++		uint32_t filesz = gpu_u32le(p + 16), memsz = gpu_u32le(p + 20);
++		uint32_t flags = gpu_u32le(p + 24);
++		printf("SWEET GPU: G7 phdr %u: type=%u paddr=0x%x filesz=%u memsz=%u flags=0x%x\n",
++		    i, type, paddr, filesz, memsz, flags);
++		if (type != MDT_PT_LOAD || (flags & MDT_TYPE_MASK) == MDT_TYPE_HASH || memsz == 0) {
++			continue;
++		}
++		load_idx = (int)i;
++		relocate = relocate || !!(flags & MDT_RELOCATABLE);
++		if (paddr < min_addr) { min_addr = paddr; }
++		uint64_t end = ((uint64_t)paddr + memsz + 0xfffull) & ~0xfffull;
++		if (end > max_addr) { max_addr = end; }
++	}
++	if (load_idx < 0 || max_addr <= min_addr ||
++	    max_addr - min_addr > SURYA_ZAP_CARVEOUT_SIZE) {
++		printf("SWEET GPU: G7 zap extent does not fit the 0x%x carve-out; skipping\n",
++		    SURYA_ZAP_CARVEOUT_SIZE);
++		return;
++	}
++	uint32_t mem_size = (uint32_t)(max_addr - min_addr);
++	printf("SWEET GPU: G7 %s image, mem_size=%u -> carve-out 0x%llx\n",
++	    relocate ? "relocatable" : "fixed", mem_size, SURYA_ZAP_CARVEOUT_PA);
++
++	uint64_t answer = 0;
++	int32_t rc = sweet_scm_verbose("G7 PAS_SHUTDOWN (release)",
++	    SCM_64 | SCM_SIP | SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_GPU, 0, 0, &answer);
++	if (rc != 0) {
++		printf("SWEET GPU: G7 PAS_SHUTDOWN refused (rc=%d), zap not safe to attempt\n", rc);
++		return;
++	}
++
++	vm_offset_t region = ml_io_map((vm_offset_t)SURYA_ZAP_CARVEOUT_PA, SURYA_ZAP_CARVEOUT_SIZE);
++	if (region == 0) {
++		printf("SWEET GPU: G7 ml_io_map of the carve-out failed\n");
++		return;
++	}
++	for (uint64_t i = 0; i < mdt_size; i++) {
++		*(volatile uint8_t *)(region + i) = mdt[i];
++	}
++	for (uint64_t i = mdt_size; i < SURYA_ZAP_CARVEOUT_SIZE; i++) {
++		*(volatile uint8_t *)(region + i) = 0;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++
++	answer = 0;
++	rc = sweet_scm_verbose("G7 PAS_INIT_IMAGE (a615 metadata, low-bank carve-out)",
++	    SCM_FAST | SCM_64 | SCM_SIP | SCM_PAS_INIT_IMAGE,
++	    0x82u, PAS_GPU, SURYA_ZAP_CARVEOUT_PA, 0, &answer);
++	if (rc != 0) {
++		printf("SWEET GPU: G7 PAS_INIT_IMAGE REJECTED rc=%d answer=0x%llx\n",
++		    rc, (unsigned long long)answer);
++		return;
++	}
++	printf("SWEET GPU: G7 PAS_INIT_IMAGE ACCEPTED\n");
++
++	answer = 0;
++	rc = sweet_scm_verbose("G7 PAS_MEM_SETUP (zap carve-out)",
++	    SCM_FAST | SCM_64 | SCM_SIP | SCM_PAS_MEM_SETUP_G7,
++	    3u, PAS_GPU, SURYA_ZAP_CARVEOUT_PA, mem_size, &answer);
++	if (rc != 0) {
++		printf("SWEET GPU: G7 PAS_MEM_SETUP REJECTED rc=%d answer=0x%llx\n", rc, (unsigned long long)answer);
++		(void)sweet_scm_verbose("G7 PAS_SHUTDOWN (cleanup)",
++		    SCM_64 | SCM_SIP | SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_GPU, 0, 0, &answer);
++		return;
++	}
++	printf("SWEET GPU: G7 PAS_MEM_SETUP ACCEPTED\n");
++
++	const uint8_t *p = mdt + phoff + 32u * (uint32_t)load_idx;
++	uint32_t paddr  = gpu_u32le(p + 12);
++	uint32_t filesz = gpu_u32le(p + 16);
++	uint64_t off = relocate ? ((uint64_t)paddr - min_addr)
++	                        : ((uint64_t)paddr - SURYA_ZAP_CARVEOUT_PA);
++	if (off + filesz > mem_size || filesz > b02_size) {
++		printf("SWEET GPU: G7 b02 (%u) does not fit at offset 0x%llx of mem %u\n",
++		    filesz, (unsigned long long)off, mem_size);
++		(void)sweet_scm_verbose("G7 PAS_SHUTDOWN (cleanup)",
++		    SCM_64 | SCM_SIP | SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_GPU, 0, 0, &answer);
++		return;
++	}
++	for (uint32_t i = 0; i < mem_size; i++) {
++		*(volatile uint8_t *)(region + i) = 0;
++	}
++	for (uint32_t i = 0; i < filesz; i++) {
++		*(volatile uint8_t *)(region + off + i) = b02[i];
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	printf("SWEET GPU: G7 copied %u bytes of ZapB02 to carve-out+0x%llx\n",
++	    filesz, (unsigned long long)off);
++
++	answer = 0;
++	rc = sweet_scm_verbose("G7 PAS_AUTH_AND_RESET (start the zap)",
++	    SCM_FAST | SCM_64 | SCM_SIP | SCM_PAS_AUTH_AND_RESET,
++	    SCM_ONE_VALUE, PAS_GPU, 0, 0, &answer);
++	if (rc != 0) {
++		printf("SWEET GPU: G7 PAS_AUTH_AND_RESET REJECTED rc=%d answer=0x%llx\n", rc, (unsigned long long)answer);
++		return;
++	}
++	printf("SWEET GPU: G7 *** TRUSTZONE AUTHENTICATED THE ZAP AND STARTED IT ***\n");
++
++	uint32_t pre = cp_wptr;
++	cp_emit(pm4_pkt7(GPU_CP_SET_SECURE_MODE, 1));
++	cp_emit(0);
++	to_memory(cp_block_kva + CP_BLK_RING, 64);
++	cp_wr(core, A6XX_CP_RB_WPTR, cp_wptr);
++	if (!cp_wait_idle(core, "CP_SET_SECURE_MODE 0")) {
++		return;
++	}
++	printf("SWEET GPU: G7 *** CP IS OUT OF SECURE MODE (ring %u -> %u) ***\n", pre, cp_wptr);
++
++	volatile uint32_t *memwr = (volatile uint32_t *)(cp_block_kva + CP_BLK_SCRATCH + SCRATCH_MEMWR_OFF);
++	volatile uint32_t *tsp   = (volatile uint32_t *)(cp_block_kva + CP_BLK_SCRATCH + SCRATCH_TS_OFF);
++	*memwr = 0; *tsp = 0;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	cp_emit(pm4_pkt7(GPU_CP_NOP, 1));
++	cp_emit(0);
++	cp_emit(pm4_pkt7(GPU_CP_MEM_WRITE, 3));
++	cp_emit((uint32_t)(CP_VA_SCRATCH + SCRATCH_MEMWR_OFF));
++	cp_emit(0);
++	cp_emit(MEMWR_VAL);
++	cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 4));
++	cp_emit(GPU_CP_EVENT_WRITE_IRQ | GPU_CP_CACHE_FLUSH_TS);
++	cp_emit((uint32_t)(CP_VA_SCRATCH + SCRATCH_TS_OFF));
++	cp_emit(0);
++	cp_emit(SEQ_VAL);
++	to_memory(cp_block_kva + CP_BLK_RING, 128);
++	cp_wr(core, A6XX_CP_RB_WPTR, cp_wptr);
++	bool drained = cp_wait_idle(core, "first submit (NOP + MEM_WRITE + CACHE_FLUSH_TS)");
++	for (int i = 0; i < 5000 && (*memwr != MEMWR_VAL || *tsp != SEQ_VAL); i++) {
++		IODelay(10);
++	}
++	printf("SWEET GPU: G7 scratch after submit: mem=0x%08x (want 0x%08x) ts=0x%08x (want 0x%08x)\n",
++	    *memwr, MEMWR_VAL, *tsp, SEQ_VAL);
++	if (drained && *memwr == MEMWR_VAL && *tsp == SEQ_VAL) {
++		printf("SWEET GPU: G7 ***** THE ADRENO 618 EXECUTED A REAL SUBMIT - THE GPU IS LIVE *****\n");
++	} else {
++		printf("SWEET GPU: G7 first submit DID NOT fully retire (drained=%d). Inspect fault registers.\n", drained);
++	}
++}
++
++
+ bool
+ SweetGPU::start(IOService *provider)
+ {

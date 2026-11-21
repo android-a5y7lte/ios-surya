@@ -2768,3 +2768,31 @@ Sequence from fajita (their 0146):
   (copy b02 payload to zap_pa)
   PAS_AUTH_AND_RESET PAS_ID=13            -> expect rc=0 and the zap runs
   CP packet: CP_SET_SECURE_MODE 0         -> we leave secure, then the real submit is open
+
+### Patch 0155: G7 - zap shader through TrustZone, CP_SET_SECURE_MODE 0, first real submit
+Behind `sweetzap=1` (default 0 so the existing CP milestone is not disturbed). Called from G6-b
+right after "THE CP EXECUTED ITS FIRST PACKET". The sequence, after fajita's 0146:
+  1. PAS_SHUTDOWN(13)                      release whatever Android left
+  2. ml_io_map(0x97715000, 0x2000); copy ZapMdt bytes into it
+  3. PAS_INIT_IMAGE(13, 0x97715000)        TZ reads the a615 metadata, stores hashes
+  4. PAS_MEM_SETUP(13, 0x97715000, mem_sz) TZ marks the carve-out as our zap region
+  5. zero carve-out + copy ZapB02 to offset (paddr - min_addr), relocatable path
+  6. PAS_AUTH_AND_RESET(13)                TZ hashes segment, runs the zap on the core
+  7. PM4 CP_SET_SECURE_MODE 0 on the ring, wait idle
+  8. PM4 NOP + CP_MEM_WRITE(0x5ee70001) + CP_EVENT_WRITE(CACHE_FLUSH_TS, 0x600d0001)
+     poll the scratch page for both values - that is the first REAL submit
+Every PAS call prints its rc/answer; a failure bails out and leaves pas_id 13 shut down. No GMU
+teardown on failure - only the CP ring state and the zap carve-out are touched.
+TEST: `ARGS='sweetgpu=18 sweetzap=1'`. Expected sequence:
+  G6-b ... CP EXECUTED ITS FIRST PACKET
+  G7 ZapMdt 6860 bytes ... ZapB02 1968 bytes
+  G7 PAS_SHUTDOWN accepted
+  G7 PAS_INIT_IMAGE ACCEPTED
+  G7 PAS_MEM_SETUP ACCEPTED
+  G7 copied 1968 bytes of ZapB02 to carve-out+0x?
+  G7 TRUSTZONE AUTHENTICATED THE ZAP AND STARTED IT
+  G7 CP IS OUT OF SECURE MODE
+  G7 scratch after submit: mem=0x5ee70001 (want 0x5ee70001) ts=0x600d0001 (want 0x600d0001)
+  G7 ***** THE ADRENO 618 EXECUTED A REAL SUBMIT - THE GPU IS LIVE *****
+If any PAS step is rejected, the diagnostic line names the step and the rc; from there we know
+whether the a615 image is accepted by this TZ build and whether PAS_MEM_SETUP needs tuning.

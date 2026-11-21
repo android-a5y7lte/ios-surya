@@ -1,0 +1,80 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 13f7a51..c633bb5 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -3229,6 +3229,75 @@ sweet_gpu_g7_zap_and_submit(vm_offset_t core)
+ 		printf("SWEET GPU: G7 ***** THE ADRENO 618 EXECUTED A REAL SUBMIT - THE GPU IS LIVE *****\n");
+ 	} else {
+ 		printf("SWEET GPU: G7 first submit DID NOT fully retire (drained=%d). Inspect fault registers.\n", drained);
++		return;
++	}
++
++	/* 0158 (G8): multi-submit. Four back-to-back submits, all enqueued before
++	 * the ring doorbell is rung, then one wait_idle; verify all eight scratch
++	 * slots got the markers the CP was asked to write. Confirms the pipeline
++	 * keeps up with queue depth > 1 and that CACHE_FLUSH_TS handles multiple
++	 * in-flight writes without reordering/losing any. No new SMCs, no new
++	 * hardware config - this is just the first submit times four.
++	 *
++	 * Scratch slots are spaced 0x20 apart starting at 0x200 (well clear of
++	 * G7's 0x100/0x110). mem[i] = 0xdead0000 | i, ts[i] = 0xcafe0000 | i. */
++#define G8_SCRATCH_BASE  0x200u
++#define G8_SLOT_SIZE     0x20u
++#define G8_NSUBMIT       4u
++	volatile uint32_t *g8m[G8_NSUBMIT];
++	volatile uint32_t *g8t[G8_NSUBMIT];
++	for (uint32_t i = 0; i < G8_NSUBMIT; i++) {
++		g8m[i] = (volatile uint32_t *)(cp_block_kva + CP_BLK_SCRATCH + G8_SCRATCH_BASE + i * G8_SLOT_SIZE);
++		g8t[i] = (volatile uint32_t *)(cp_block_kva + CP_BLK_SCRATCH + G8_SCRATCH_BASE + i * G8_SLOT_SIZE + 0x10);
++		*g8m[i] = 0;
++		*g8t[i] = 0;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++
++	uint32_t g8_pre = cp_wptr;
++	for (uint32_t i = 0; i < G8_NSUBMIT; i++) {
++		cp_emit(pm4_pkt7(GPU_CP_NOP, 1));
++		cp_emit(0x80000000u | i);   /* NOP payload = tag so the ring log tells us which submit */
++		cp_emit(pm4_pkt7(GPU_CP_MEM_WRITE, 3));
++		cp_emit((uint32_t)(CP_VA_SCRATCH + G8_SCRATCH_BASE + i * G8_SLOT_SIZE));
++		cp_emit(0);
++		cp_emit(0xdead0000u | i);
++		cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 4));
++		cp_emit(GPU_CP_EVENT_WRITE_IRQ | GPU_CP_CACHE_FLUSH_TS);
++		cp_emit((uint32_t)(CP_VA_SCRATCH + G8_SCRATCH_BASE + i * G8_SLOT_SIZE + 0x10));
++		cp_emit(0);
++		cp_emit(0xcafe0000u | i);
++	}
++	to_memory(cp_block_kva + CP_BLK_RING, 512);
++	cp_wr(core, A6XX_CP_RB_WPTR, cp_wptr);
++	printf("SWEET GPU: G8 enqueued %u submits (ring %u -> %u, %u dwords each) and rang once\n",
++	    G8_NSUBMIT, g8_pre, cp_wptr, (cp_wptr - g8_pre) / G8_NSUBMIT);
++	bool g8_drained = cp_wait_idle(core, "G8 multi-submit");
++	for (int i = 0; i < 5000; i++) {
++		bool all_in = true;
++		for (uint32_t j = 0; j < G8_NSUBMIT; j++) {
++			if (*g8m[j] != (0xdead0000u | j) || *g8t[j] != (0xcafe0000u | j)) {
++				all_in = false;
++				break;
++			}
++		}
++		if (all_in) { break; }
++		IODelay(10);
++	}
++	uint32_t ok = 0;
++	for (uint32_t i = 0; i < G8_NSUBMIT; i++) {
++		bool m_ok = (*g8m[i] == (0xdead0000u | i));
++		bool t_ok = (*g8t[i] == (0xcafe0000u | i));
++		printf("SWEET GPU: G8 slot %u: mem=0x%08x (want 0x%08x %s) ts=0x%08x (want 0x%08x %s)\n",
++		    i, *g8m[i], 0xdead0000u | i, m_ok ? "OK" : "MISS",
++		    *g8t[i], 0xcafe0000u | i, t_ok ? "OK" : "MISS");
++		if (m_ok && t_ok) { ok++; }
++	}
++	if (g8_drained && ok == G8_NSUBMIT) {
++		printf("SWEET GPU: G8 ***** ALL %u SUBMITS RETIRED IN ORDER - THE CP PIPELINE WORKS *****\n", G8_NSUBMIT);
++	} else {
++		printf("SWEET GPU: G8 only %u/%u submits retired (drained=%d). Pipeline reordered, dropped, or stalled.\n",
++		    ok, G8_NSUBMIT, g8_drained);
+ 	}
+ }
+ 

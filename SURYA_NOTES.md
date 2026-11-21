@@ -2739,3 +2739,32 @@ SUSPECTS TO TEST ONE AT A TIME (small patches, sweetcp=0 as a safety net each ti
   d. S2CR for CP writes PRIV | CP_SMMU_CTX. PRIV is (3<<8); on arm-smmu Linux PRIVCFG==3 is
      "PRIV" (force privileged). fsynr0 says PnU=0 (unprivileged) on the fault. PRIVCFG may not
      apply the way we assume - test S2CR = CP_SMMU_CTX only (no PRIVCFG) and see.
+
+## ***** 0154 RESULT (2026-11-21 14:38): THE CP EXECUTED ITS FIRST PACKET *****
+`ARGS='sweetgpu=18'`, run 44822962007:
+  250: G6-b CP_ME_INIT: ring idle (RPTR=WPTR=9) rbbm_status=0x00000001 cp_status1=0x01000000
+  251: G6-b cb1 after the fetch: fsr=0x00000400 far=0x0 fsynr0=0x0 sGFSR=0x0 (no fault bits)
+  252: G6-b *** THE CP EXECUTED ITS FIRST PACKET - CP_ME_INIT fetched through CB1, run and retired ***
+Byte-identical to fajita's working log. First full a6xx CP bring-up on this device, EVER.
+
+OPEN QUESTION about this result: 0154 is behaviourally IDENTICAL to 0152 (it only reverts 0153's
+CBAR change, which 0152 did not have). 0152 reproducibly failed at fsr=0x408; 0154 passed. Possible
+explanations: the SMMU/CP state inherited from the prior 0153 POCO-splash hang was cleared more
+thoroughly by this cycle; or there was a state-leak from a Nov 15/16 boot that we missed; or the
+compiler laid out the code slightly differently and a timing race resolved. The result is good either
+way, but needs CONFIRMATION by rebooting + rerunning once or twice to see if it is stable. If one of
+the next boots fails with fsr=0x408 again, this is an inter-boot non-determinism and the real fix is
+to clear SMMU/GPU state explicitly at the start of G6-b.
+
+### NEXT RUNG after confirmation: the zap shader
+Inputs already in the payload (`ZapMdt`, `ZapB02`) and in-tree code already does TZ-B.1 through B.4
+(the SMC-side plumbing works, PAS_SHUTDOWN returned rc=0 on 2026-11-14). What is new is:
+- the core is NOW POWERED (G6-a confirms), so PAS_INIT_IMAGE's -3145797 from early sessions should
+  go away
+- the firmware is now the device-signed a615 (mdt + b02) rather than sdm845's a630_zap.mbn
+Sequence from fajita (their 0146):
+  PAS_INIT_IMAGE  mdt_pa, mdt_size        -> expect rc=0
+  PAS_MEM_SETUP   PAS_ID=13, zap_pa, size -> expect rc=0
+  (copy b02 payload to zap_pa)
+  PAS_AUTH_AND_RESET PAS_ID=13            -> expect rc=0 and the zap runs
+  CP packet: CP_SET_SECURE_MODE 0         -> we leave secure, then the real submit is open

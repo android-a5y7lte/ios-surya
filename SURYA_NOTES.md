@@ -2797,7 +2797,7 @@ TEST: `ARGS='sweetgpu=18 sweetzap=1'`. Expected sequence:
 If any PAS step is rejected, the diagnostic line names the step and the rc; from there we know
 whether the a615 image is accepted by this TZ build and whether PAS_MEM_SETUP needs tuning.
 
-### Patch 0155 ran on device, 2026-11-21: ELF parse works, PAS_SHUTDOWN's result never prints
+### Patch 0155 ran on device, 2026-11-21: G7 returned to caller WITHOUT printing anything after the PAS_SHUTDOWN PRE line
 First boot with `ARGS='sweetgpu=18 sweetzap=1'` on CI build 44909444374 reached G7 and printed:
   SWEET GPU: G7 zap shader + CP_SET_SECURE_MODE 0 + first submit (sweetzap=1)
   SWEET GPU: G7 ZapMdt 6860 bytes at 0xfffffe0008528000, ZapB02 1968 bytes at 0xfffffe000852c000
@@ -2818,9 +2818,16 @@ Two bugs identified from this one log so far:
   image" path we took would have tried to compute off = paddr - carveout_pa = 0x5000 -
   0x97715000, underflowing uint64 and failing the b02 bounds check - so even with a successful
   PAS sequence 0155 would have bailed before PAS_AUTH_AND_RESET.
-- PAS_SHUTDOWN is issued but no result line prints. If this is a TZ-side reset, the fix is not
-  MDT_RELOCATABLE; need to see raw log around line 259 to confirm whether a second kernel boot
-  header follows.
+- PAS_SHUTDOWN is issued but no result line prints. `od -c` on log bytes 258..261 confirmed the
+  PRE line's trailing `\n` is IMMEDIATELY followed by `ktriage_register_subsystem_strings` - no
+  NULs, no torn bytes, no partial POST, no "INTERRUPTED 100 times". The POST printf path inside
+  sweet_scm_verbose never executed, AND the subsequent G7 printfs (`rc=...refused`, `ml_io_map
+  failed`, or `PAS_INIT_IMAGE ACCEPTED`) also never executed. Only a longjmp / exception /
+  stack-unwind or something modifying ELR after the SMC can skip between two adjacent printfs in
+  the same function. No second kernel boot header in the log (grep count 0), so no reset.
+  Earlier B.4 PAS_SHUTDOWN that returned rc=0 (SURYA_NOTES.md:1952) was a DIFFERENT CALL SITE
+  in a different session (patches 0128/0129, sweettz=5). The primitive works; something at THIS
+  callsite doesn't.
 
 ### CI trap repeat: patch 0155 was silently skipped on build 44906819154
 Second symptom seen for the second time in this session. `git apply` failures in CI emit a

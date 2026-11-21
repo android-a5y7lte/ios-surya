@@ -1,0 +1,15 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -3013,7 +3013,10 @@ sweet_tz_b4_zap_carveout(void)
+ #define MDT_PT_LOAD             1u
+ #define MDT_TYPE_MASK           (7u << 24)
+ #define MDT_TYPE_HASH           (2u << 24)
+-#define MDT_RELOCATABLE         (4u << 24)
++/* 0156: Linux's qcom_mdt_loader.h has QCOM_MDT_RELOCATABLE = BIT(27), not bit 26.
++ * 0155's (4u << 24) = bit 26 mis-read a615_zap's phdr 2 (flags=0x8000007) as a fixed
++ * image, which made the b02 copy offset underflow and the zap stage bail. */
++#define MDT_RELOCATABLE         (1u << 27)
+
+ static inline uint32_t gpu_u32le(const uint8_t *p) {
+ 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);

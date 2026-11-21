@@ -1,0 +1,85 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -3298,6 +3298,82 @@ sweet_gpu_g7_zap_and_submit(vm_offset_t core)
+ 	} else {
+ 		printf("SWEET GPU: G8 only %u/%u submits retired (drained=%d). Pipeline reordered, dropped, or stalled.\n",
+ 		    ok, G8_NSUBMIT, g8_drained);
++		return;
+ 	}
++
++	/* 0159 (G9): minimal a6xx_hw_init. Registers mainline msm_gpu's
++	 * a6xx_hw_init writes to prime the GPU for real 2D/3D work:
++	 *   - GBIF client QoS so DRAM writes aren't throttled
++	 *   - UCHE write/trap/write-thru ranges (49-bit VA = "allow everything",
++	 *     sentinel trap VA so unmapped-VA bugs stay noisy)
++	 *   - UCHE GMEM range (where tiled rendering spills to on-chip GMEM; a618
++	 *     has 512 KiB at phys 0x100000, same layout as a615)
++	 *   - UCHE cache ways + filter from mainline defaults
++	 *   - CP ROQ thresholds + mem_pool size (already set once by G6-b's
++	 *     CP_ME_INIT, re-asserted here for the full hw_init pattern)
++	 * None of this is needed for scratch MEM_WRITEs (that's why G7/G8 worked),
++	 * but the UCHE write range and GMEM base are what let the GPU retire real
++	 * blits. Skips CP_PROTECT (complex, optional - the CP can clobber itself
++	 * without it) and interrupt masks (we poll, no handler to route to).
++	 * Read-back each write for a sanity check. */
++#define A618_GMEM_BASE 0x00100000u
++#define A618_GMEM_SIZE 0x00080000u
++	printf("SWEET GPU: G9 a6xx_hw_init - UCHE apertures, GBIF QoS, cache config\n");
++
++	/* GBIF client QoS: 0x3 for a615 family (mainline a6xx_gpu.c a6xx_hw_init,
++	 * adreno_is_a615_family() branch). */
++	cp_wr(core, A6XX_RBBM_GBIF_CLIENT_QOS_CNTL, 0x3u);
++
++	/* UCHE WRITE_RANGE_MAX = 0x0001FFFF_FFFFFFFF ("allow all 49-bit VA") */
++	cp_wr64(core, A6XX_UCHE_WRITE_RANGE_MAX, 0x0001FFFFFFFFFFFFull);
++
++	/* UCHE TRAP_BASE and WRITE_THRU_BASE = 0x0001FFFFF000 (mainline's
++	 * sentinel - accessing this VA triggers the fault path, which keeps
++	 * unmapped-VA bugs obvious in the log). */
++	cp_wr64(core, A6XX_UCHE_TRAP_BASE,       0x0001FFFFF000ull);
++	cp_wr64(core, A6XX_UCHE_WRITE_THRU_BASE, 0x0001FFFFF000ull);
++
++	/* UCHE GMEM range: 512 KiB at phys 0x100000 for a618 */
++	cp_wr64(core, A6XX_UCHE_GMEM_RANGE_MIN, (uint64_t)A618_GMEM_BASE);
++	cp_wr64(core, A6XX_UCHE_GMEM_RANGE_MAX, (uint64_t)A618_GMEM_BASE + A618_GMEM_SIZE - 1u);
++
++	/* UCHE cache config: mainline defaults for a615 family */
++	cp_wr(core, A6XX_UCHE_CACHE_WAYS,  0x4u);
++	cp_wr(core, A6XX_UCHE_FILTER_CNTL, 0x804u);
++
++	/* CP ROQ thresholds + mem pool: also set by CP_ME_INIT in G6-b, re-assert
++	 * so a future context switch that resets them still has sane values. */
++	cp_wr(core, A6XX_CP_ROQ_THRESHOLDS_2, 0x010000c0u);
++	cp_wr(core, A6XX_CP_ROQ_THRESHOLDS_1, 0x8040362cu);
++	cp_wr(core, A6XX_CP_MEM_POOL_SIZE,    128u);
++
++	/* Read back everything we wrote for a sanity check. */
++	uint32_t qos      = cp_rd(core, A6XX_RBBM_GBIF_CLIENT_QOS_CNTL);
++	uint32_t wr_lo    = cp_rd(core, A6XX_UCHE_WRITE_RANGE_MAX);
++	uint32_t wr_hi    = cp_rd(core, A6XX_UCHE_WRITE_RANGE_MAX + 1u);
++	uint32_t trap_lo  = cp_rd(core, A6XX_UCHE_TRAP_BASE);
++	uint32_t trap_hi  = cp_rd(core, A6XX_UCHE_TRAP_BASE + 1u);
++	uint32_t gmin_lo  = cp_rd(core, A6XX_UCHE_GMEM_RANGE_MIN);
++	uint32_t gmin_hi  = cp_rd(core, A6XX_UCHE_GMEM_RANGE_MIN + 1u);
++	uint32_t gmax_lo  = cp_rd(core, A6XX_UCHE_GMEM_RANGE_MAX);
++	uint32_t gmax_hi  = cp_rd(core, A6XX_UCHE_GMEM_RANGE_MAX + 1u);
++	uint32_t ways     = cp_rd(core, A6XX_UCHE_CACHE_WAYS);
++	uint32_t filter   = cp_rd(core, A6XX_UCHE_FILTER_CNTL);
++	printf("SWEET GPU: G9 GBIF_CLIENT_QOS_CNTL=0x%x (want 0x3)\n", qos);
++	printf("SWEET GPU: G9 UCHE WRITE_RANGE_MAX=0x%08x_%08x (want 0x0001FFFF_FFFFFFFF)\n", wr_hi, wr_lo);
++	printf("SWEET GPU: G9 UCHE TRAP_BASE      =0x%08x_%08x (want 0x00000001_FFFFF000)\n", trap_hi, trap_lo);
++	printf("SWEET GPU: G9 UCHE GMEM_RANGE_MIN =0x%08x_%08x (want 0x00000000_00100000)\n", gmin_hi, gmin_lo);
++	printf("SWEET GPU: G9 UCHE GMEM_RANGE_MAX =0x%08x_%08x (want 0x00000000_0017FFFF)\n", gmax_hi, gmax_lo);
++	printf("SWEET GPU: G9 UCHE CACHE_WAYS=0x%x (want 0x4) FILTER_CNTL=0x%x (want 0x804)\n", ways, filter);
++
++	bool g9_ok = (qos == 0x3u) && (wr_lo == 0xFFFFFFFFu) && (wr_hi == 0x1FFFFu) &&
++	    (gmin_lo == 0x00100000u) && (gmin_hi == 0) &&
++	    (gmax_lo == 0x0017FFFFu) && (gmax_hi == 0) &&
++	    (ways == 0x4u) && (filter == 0x804u);
++	if (g9_ok) {
++		printf("SWEET GPU: G9 ***** a6xx hw_init COMPLETE - UCHE and GBIF configured for real blits *****\n");
++	} else {
++		printf("SWEET GPU: G9 hw_init readbacks did not all match - inspect lines above\n");
++	}
+ }

@@ -2796,3 +2796,45 @@ TEST: `ARGS='sweetgpu=18 sweetzap=1'`. Expected sequence:
   G7 ***** THE ADRENO 618 EXECUTED A REAL SUBMIT - THE GPU IS LIVE *****
 If any PAS step is rejected, the diagnostic line names the step and the rc; from there we know
 whether the a615 image is accepted by this TZ build and whether PAS_MEM_SETUP needs tuning.
+
+### Patch 0155 ran on device, 2026-11-21: ELF parse works, PAS_SHUTDOWN's result never prints
+First boot with `ARGS='sweetgpu=18 sweetzap=1'` on CI build 44909444374 reached G7 and printed:
+  SWEET GPU: G7 zap shader + CP_SET_SECURE_MODE 0 + first submit (sweetzap=1)
+  SWEET GPU: G7 ZapMdt 6860 bytes at 0xfffffe0008528000, ZapB02 1968 bytes at 0xfffffe000852c000
+  SWEET GPU: G7 phdr 0: type=0 paddr=0x0 filesz=148 memsz=0 flags=0x7000000
+  SWEET GPU: G7 phdr 1: type=0 paddr=0x6000 filesz=6712 memsz=8192 flags=0x2200000
+  SWEET GPU: G7 phdr 2: type=1 paddr=0x5000 filesz=1968 memsz=1968 flags=0x8000007
+  SWEET GPU: G7 fixed image, mem_size=4096 -> carve-out 0x97715000
+  SWEET TZ: B.4 smc 0x42000206 (G7 PAS_SHUTDOWN (release)) arginfo 0x1 args 0xd 0x0 0x0
+and then the log stops - no POST line from sweet_scm_verbose, no PAS_SHUTDOWN accepted/refused,
+no INTERRUPTED-100 line. iOS kept booting (AMFI, Sandbox, Skywalk visible on screen) which
+strongly suggests TZ reset the core on that SMC and the second boot came up with sweetzap=0
+(ABL does not re-inject boot-args after a reset), i.e. what Jimmy saw on screen is boot #2.
+Still need to confirm by looking for two "# version 1, ring" headers in the log.
+
+Two bugs identified from this one log so far:
+- MDT_RELOCATABLE was (4u << 24) = bit 26. Linux's QCOM_MDT_RELOCATABLE is BIT(27). phdr 2's
+  flags=0x8000007 HAS bit 27, so a615_zap IS relocatable. 0156 fixes the define. The "fixed
+  image" path we took would have tried to compute off = paddr - carveout_pa = 0x5000 -
+  0x97715000, underflowing uint64 and failing the b02 bounds check - so even with a successful
+  PAS sequence 0155 would have bailed before PAS_AUTH_AND_RESET.
+- PAS_SHUTDOWN is issued but no result line prints. If this is a TZ-side reset, the fix is not
+  MDT_RELOCATABLE; need to see raw log around line 259 to confirm whether a second kernel boot
+  header follows.
+
+### CI trap repeat: patch 0155 was silently skipped on build 44906819154
+Second symptom seen for the second time in this session. `git apply` failures in CI emit a
+WARNING but do not fail the step - the build finishes "successfully" with the patch not applied.
+Always `gh run view <id> --log` and grep for "Skipping patch" / "already upstream, previously
+applied, or malformed" after any run that boots to the previous milestone's behavior unchanged.
+Root cause on 0155: a regex-based block move of the G7 body produced a context that only
+matched my local tree. Fixed by `git reset --hard` to the last clean baseline and regenerating
+0155 as a pure ADD. Added to the running "don't trust 'success' alone" bucket.
+
+### Patch 0156: MDT_RELOCATABLE = BIT(27)
+One-line define change on top of 0155. Verified `git apply --check` clean against 0155's tree.
+Build 44925631612 dispatched 2026-11-21 16:37 UTC. Expected on-device behaviour: phdr 2 still
+flags=0x8000007 but now detected relocatable; min_addr=0x5000, off = paddr - min_addr = 0; b02
+copies to carveout+0 (not carveout+(huge-underflow)). This is only useful if 0155's missing
+PAS_SHUTDOWN POST is a logging artefact rather than a reset - the log confirmation above
+decides which way we go next.

@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
 --- a/iokit/Kernel/arm/SweetGPU.cpp
 +++ b/iokit/Kernel/arm/SweetGPU.cpp
-@@ -3298,6 +3298,82 @@ sweet_gpu_g7_zap_and_submit(vm_offset_t core)
+@@ -3298,5 +3298,81 @@ sweet_gpu_g7_zap_and_submit(vm_offset_t core)
  	} else {
  		printf("SWEET GPU: G8 only %u/%u submits retired (drained=%d). Pipeline reordered, dropped, or stalled.\n",
  		    ok, G8_NSUBMIT, g8_drained);

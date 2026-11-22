@@ -35,7 +35,7 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
  static void
  cp_emit(uint32_t v)
  {
-@@ -3372,7 +3399,151 @@
+@@ -3372,6 +3399,157 @@
  	if (g9_ok) {
  		printf("SWEET GPU: G9 ***** a6xx hw_init COMPLETE - UCHE and GBIF configured for real blits *****\n");
  	} else {

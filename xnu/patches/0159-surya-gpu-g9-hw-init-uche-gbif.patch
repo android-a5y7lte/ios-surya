@@ -31,8 +31,8 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
 +	 * adreno_is_a615_family() branch). */
 +	cp_wr(core, A6XX_RBBM_GBIF_CLIENT_QOS_CNTL, 0x3u);
 +
-+	/* UCHE WRITE_RANGE_MAX = 0x0001FFFF_FFFFFFFF ("allow all 49-bit VA") */
-+	cp_wr64(core, A6XX_UCHE_WRITE_RANGE_MAX, 0x0001FFFFFFFFFFFFull);
++	/* UCHE WRITE_RANGE_MAX readback uses the aligned stored value. */
++	cp_wr64(core, A6XX_UCHE_WRITE_RANGE_MAX, 0x0001ffffffffffc0ull);
 +
 +	/* UCHE TRAP_BASE and WRITE_THRU_BASE = 0x0001FFFFF000 (mainline's
 +	 * sentinel - accessing this VA triggers the fault path, which keeps
@@ -66,16 +66,16 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
 +	uint32_t gmax_hi  = cp_rd(core, A6XX_UCHE_GMEM_RANGE_MAX + 1u);
 +	uint32_t ways     = cp_rd(core, A6XX_UCHE_CACHE_WAYS);
 +	uint32_t filter   = cp_rd(core, A6XX_UCHE_FILTER_CNTL);
-+	printf("SWEET GPU: G9 GBIF_CLIENT_QOS_CNTL=0x%x (want 0x3)\n", qos);
-+	printf("SWEET GPU: G9 UCHE WRITE_RANGE_MAX=0x%08x_%08x (want 0x0001FFFF_FFFFFFFF)\n", wr_hi, wr_lo);
++	printf("SWEET GPU: G9 GBIF_CLIENT_QOS_CNTL skipped (offset not known for G9)\n");
++	printf("SWEET GPU: G9 UCHE WRITE_RANGE_MAX=0x%08x_%08x (want 0x0001FFFF_FFFFFFFF_FFC0)\n", wr_hi, wr_lo);
 +	printf("SWEET GPU: G9 UCHE TRAP_BASE      =0x%08x_%08x (want 0x00000001_FFFFF000)\n", trap_hi, trap_lo);
 +	printf("SWEET GPU: G9 UCHE GMEM_RANGE_MIN =0x%08x_%08x (want 0x00000000_00100000)\n", gmin_hi, gmin_lo);
-+	printf("SWEET GPU: G9 UCHE GMEM_RANGE_MAX =0x%08x_%08x (want 0x00000000_0017FFFF)\n", gmax_hi, gmax_lo);
++	printf("SWEET GPU: G9 UCHE GMEM_RANGE_MAX =0x%08x_%08x (want 0x00000000_0017F000)\n", gmax_hi, gmax_lo);
 +	printf("SWEET GPU: G9 UCHE CACHE_WAYS=0x%x (want 0x4) FILTER_CNTL=0x%x (want 0x804)\n", ways, filter);
 +
-+	bool g9_ok = (qos == 0x3u) && (wr_lo == 0xFFFFFFFFu) && (wr_hi == 0x1FFFFu) &&
++	bool g9_ok = (wr_lo == 0xFFFFFFC0u) && (wr_hi == 0x1FFFFu) &&
 +	    (gmin_lo == 0x00100000u) && (gmin_hi == 0) &&
-+	    (gmax_lo == 0x0017FFFFu) && (gmax_hi == 0) &&
++	    (gmax_lo == (uint32_t)(0x0017FFFFull & ~0xFFFull)) && (gmax_hi == 0) &&
 +	    (ways == 0x4u) && (filter == 0x804u);
 +	if (g9_ok) {
 +		printf("SWEET GPU: G9 ***** a6xx hw_init COMPLETE - UCHE and GBIF configured for real blits *****\n");

@@ -66,7 +66,7 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
 +	uint32_t ways     = cp_rd(core, A6XX_UCHE_CACHE_WAYS);
 +	uint32_t filter   = cp_rd(core, A6XX_UCHE_FILTER_CNTL);
 +	printf("SWEET GPU: G9 GBIF_CLIENT_QOS_CNTL skipped (offset not known for G9)\n");
-+	printf("SWEET GPU: G9 UCHE WRITE_RANGE_MAX=0x%08x_%08x (want 0x0001FFFF_FFFFFFFF_FFC0)\n", wr_hi, wr_lo);
++	printf("SWEET GPU: G9 UCHE WRITE_RANGE_MAX=0x%08x_%08x (want 0x0001FFFF_FFFFFFC0)\n", wr_hi, wr_lo);
 +	printf("SWEET GPU: G9 UCHE TRAP_BASE      =0x%08x_%08x (want 0x00000001_FFFFF000)\n", trap_hi, trap_lo);
 +	printf("SWEET GPU: G9 UCHE GMEM_RANGE_MIN =0x%08x_%08x (want 0x00000000_00100000)\n", gmin_hi, gmin_lo);
 +	printf("SWEET GPU: G9 UCHE GMEM_RANGE_MAX =0x%08x_%08x (want 0x00000000_0017F000)\n", gmax_hi, gmax_lo);

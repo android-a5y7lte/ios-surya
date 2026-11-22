@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
 --- a/iokit/Kernel/arm/SweetGPU.cpp
 +++ b/iokit/Kernel/arm/SweetGPU.cpp
-@@ -3298,5 +3298,81 @@ sweet_gpu_g7_zap_and_submit(vm_offset_t core)
+@@ -3298,5 +3298,80 @@ sweet_gpu_g7_zap_and_submit(vm_offset_t core)
  	} else {
  		printf("SWEET GPU: G8 only %u/%u submits retired (drained=%d). Pipeline reordered, dropped, or stalled.\n",
  		    ok, G8_NSUBMIT, g8_drained);
@@ -55,7 +55,6 @@ diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
 +	cp_wr(core, A6XX_CP_MEM_POOL_SIZE,    128u);
 +
 +	/* Read back everything we wrote for a sanity check. */
-+	uint32_t qos      = cp_rd(core, A6XX_RBBM_GBIF_CLIENT_QOS_CNTL);
 +	uint32_t wr_lo    = cp_rd(core, A6XX_UCHE_WRITE_RANGE_MAX);
 +	uint32_t wr_hi    = cp_rd(core, A6XX_UCHE_WRITE_RANGE_MAX + 1u);
 +	uint32_t trap_lo  = cp_rd(core, A6XX_UCHE_TRAP_BASE);

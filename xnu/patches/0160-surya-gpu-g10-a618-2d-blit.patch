@@ -1,0 +1,196 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -1491,6 +1491,33 @@
+ 	    ((opcode & 0x7fu) << 16) | (pm4_parity(opcode) << 23);
+ }
+ 
++/* PM4 type-4 register packet header (A6xx): count and register each carry
++ * odd parity. The count is the number of register values, not count - 1. */
++static void cp_emit(uint32_t v);
++
++static uint32_t
++pm4_pkt4(uint32_t reg, uint32_t count)
++{
++	return 0x40000000u | count | (pm4_parity(count) << 7) |
++	    ((reg & 0x3ffffu) << 8) | (pm4_parity(reg) << 27);
++}
++
++static void
++cp_emit_pkt4(uint32_t reg, uint32_t count, const uint32_t *values)
++{
++	cp_emit(pm4_pkt4(reg, count));
++	for (uint32_t i = 0; i < count; i++) {
++		cp_emit(values[i]);
++	}
++}
++
++static void
++cp_emit_pkt4_one(uint32_t reg, uint32_t value)
++{
++	cp_emit(pm4_pkt4(reg, 1));
++	cp_emit(value);
++}
++
+ static void
+ cp_emit(uint32_t v)
+ {
+@@ -3372,7 +3399,151 @@
+ 	if (g9_ok) {
+ 		printf("SWEET GPU: G9 ***** a6xx hw_init COMPLETE - UCHE and GBIF configured for real blits *****\n");
+ 	} else {
+-		printf("SWEET GPU: G9 hw_init readbacks did not all match - inspect lines above\n");
++		printf("SWEET GPU: G9 hw_init readbacks did not all match - G10 skipped\n");
++		return;
++	}
++
++	/* Load the A618-specific static registers from Mesa's a6xx device table.
++	 * These are the graphics-block baseline omitted by the CP-only G6/G7 path. */
++	cp_wr(core, 0x9804u, 0x0000001fu); /* PC_MODE_CNTL */
++	cp_wr(core, 0x9805u, 0x00000000u); /* PC_POWER_CNTL */
++	cp_wr(core, 0xa0f8u, 0x00000000u); /* VFD_POWER_CNTL */
++	cp_wr(core, 0xb600u, 0x00108000u); /* TPL1_DBG_ECO_CNTL */
++	cp_wr(core, 0x8600u, 0x00000880u); /* GRAS_DBG_ECO_CNTL */
++	cp_wr(core, 0xae03u, 0x00000430u); /* SP_CHICKEN_BITS */
++	cp_wr(core, 0xae00u, 0x00000000u); /* SP_DBG_ECO_CNTL */
++	cp_wr(core, 0xbe04u, 0x00080000u); /* HLSQ_DBG_ECO_CNTL */
++	cp_wr(core, 0x9600u, 0x00000000u); /* VPC_DBG_ECO_CNTL */
++	cp_wr(core, 0x0e12u, 0x00000001u); /* UCHE_UNKNOWN_0E12 */
++	cp_wr(core, 0x8e01u, 0x00000001u); /* RB_RBP_CNTL */
++	cp_wr(core, 0x8e04u, 0x04100000u); /* RB_DBG_ECO_CNTL */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	printf("SWEET GPU: G10 A618 static state PC_MODE=0x%x TPL1=0x%x GRAS=0x%x SP_CHICKEN=0x%x HLSQ=0x%x\n",
++	    cp_rd(core, 0x9804u), cp_rd(core, 0xb600u), cp_rd(core, 0x8600u),
++	    cp_rd(core, 0xae03u), cp_rd(core, 0xbe04u));
++
++	/* G10: real A6xx 2D blit, based on Mesa Freedreno's A6xx buffer blitter.
++	 * Copy 64 R8_UNORM pixels from one region of the existing CP scratch page
++	 * to another. No new allocation or SMMU mapping is needed. */
++	const uint32_t g10_src_off = 0x400u;
++	const uint32_t g10_dst_off = 0x800u;
++	const uint32_t g10_color_ts_off = 0x300u;
++	const uint32_t g10_depth_ts_off = 0x308u;
++	const uint32_t g10_cache_ts_off = 0x310u;
++	const uint32_t g10_width = 64u;
++	volatile uint8_t *g10_src = (volatile uint8_t *)(cp_block_kva + CP_BLK_SCRATCH + g10_src_off);
++	volatile uint8_t *g10_dst = (volatile uint8_t *)(cp_block_kva + CP_BLK_SCRATCH + g10_dst_off);
++	volatile uint32_t *g10_color_ts = (volatile uint32_t *)(cp_block_kva + CP_BLK_SCRATCH + g10_color_ts_off);
++	volatile uint32_t *g10_depth_ts = (volatile uint32_t *)(cp_block_kva + CP_BLK_SCRATCH + g10_depth_ts_off);
++	volatile uint32_t *g10_cache_ts = (volatile uint32_t *)(cp_block_kva + CP_BLK_SCRATCH + g10_cache_ts_off);
++	uint8_t g10_expected[64];
++	for (uint32_t i = 0; i < g10_width; i++) {
++		g10_expected[i] = (uint8_t)((i * 37u) ^ (0xa5u + i * 3u) ^ (i >> 1));
++		g10_src[i] = g10_expected[i];
++		g10_dst[i] = 0;
++	}
++	*g10_color_ts = 0;
++	*g10_depth_ts = 0;
++	*g10_cache_ts = 0;
++	to_memory(cp_block_kva + CP_BLK_SCRATCH, PAGE_SIZE);
++
++	printf("SWEET GPU: G10 A618 2D blit: 64-byte R8 copy src=0x%08x dst=0x%08x\n",
++	    CP_VA_SCRATCH + g10_src_off, CP_VA_SCRATCH + g10_dst_off);
++
++	uint32_t g10_pre = cp_wptr;
++	/* Match Mesa's emit_setup: flush and invalidate CCU color/depth first. */
++	cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 4));
++	cp_emit(0x4000001du); /* PC_CCU_FLUSH_COLOR_TS | TIMESTAMP */
++	cp_emit(CP_VA_SCRATCH + g10_color_ts_off);
++	cp_emit(0);
++	cp_emit(0);
++	cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 1));
++	cp_emit(0x19u); /* PC_CCU_INVALIDATE_COLOR */
++	cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 4));
++	cp_emit(0x4000001cu); /* PC_CCU_FLUSH_DEPTH_TS | TIMESTAMP */
++	cp_emit(CP_VA_SCRATCH + g10_depth_ts_off);
++	cp_emit(0);
++	cp_emit(0);
++	cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 1));
++	cp_emit(0x18u); /* PC_CCU_INVALIDATE_DEPTH */
++
++	/* RM6_BLIT2DSCALE = 12, then WFI before sysmem CCU configuration. */
++	cp_emit(pm4_pkt7(101u, 1)); /* CP_SET_MARKER */
++	cp_emit(12u);
++	cp_emit(pm4_pkt7(38u, 0)); /* CP_WAIT_FOR_IDLE */
++
++	/* A618: one CCU; Mesa's sysmem config places the color cache at the
++	 * 64 KiB depth-cache boundary. RB_CCU_CNTL encodes color offset at bit 23. */
++	cp_emit_pkt4_one(0x8e07u, 0x08000000u);
++	cp_emit_pkt4_one(0x8c00u, 0x00f00300u); /* RB_A2D_BLT_CNTL */
++	cp_emit_pkt4_one(0x8400u, 0x00f00300u); /* GRAS_A2D_BLT_CNTL */
++	cp_emit_pkt4_one(0xacc0u, 0x0000f018u); /* SP_A2D_OUTPUT_INFO */
++	cp_emit_pkt4_one(0x8c01u, 0u); /* RB_A2D_PIXEL_CNTL: PIXEL_OP_DISABLED */
++
++	/* Source: 64x1 linear R8, pitch 64, WZYX, Mesa's A6xx 2D source flags. */
++	const uint32_t g10_src_regs[5] = {
++		0x00500003u, g10_width | (1u << 15),
++		CP_VA_SCRATCH + g10_src_off, 0u, 0x200u
++	};
++	cp_emit_pkt4(0xb4c0u, 5, g10_src_regs);
++
++	/* Destination: same format and dimensions, 64-byte aligned pitch/base. */
++	const uint32_t g10_dst_regs[4] = {
++		0x00000003u, CP_VA_SCRATCH + g10_dst_off, 0u, 1u
++	};
++	cp_emit_pkt4(0x8c17u, 4, g10_dst_regs);
++
++	/* Source rectangle [0..63]x[0], destination rectangle [0..63]x[0]. */
++	const uint32_t g10_src_rect[4] = { 0u, (g10_width - 1u) << 8, 0u, 0u };
++	cp_emit_pkt4(0x8401u, 4, g10_src_rect);
++	const uint32_t g10_dst_rect[2] = { 0u, g10_width - 1u };
++	cp_emit_pkt4(0x8405u, 2, g10_dst_rect);
++
++	/* Mesa's FD_LABEL event (0x3f), the A618 blit WFI quirk, then CP_BLIT SCALE. */
++	cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 1));
++	cp_emit(0x3fu);
++	cp_emit(pm4_pkt7(38u, 0)); /* CP_WAIT_FOR_IDLE */
++	cp_emit(pm4_pkt7(44u, 1)); /* CP_BLIT */
++	cp_emit(3u); /* BLIT_OP_SCALE */
++	cp_emit(pm4_pkt7(38u, 0)); /* CP_WAIT_FOR_IDLE */
++
++	/* Flush the 2D engine's CCU output to system memory and wait for idle. */
++	cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 4));
++	cp_emit(0x4000001du); /* PC_CCU_FLUSH_COLOR_TS | TIMESTAMP */
++	cp_emit(CP_VA_SCRATCH + g10_color_ts_off);
++	cp_emit(0);
++	cp_emit(0);
++	cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 4));
++	cp_emit(0x4000001cu); /* PC_CCU_FLUSH_DEPTH_TS | TIMESTAMP */
++	cp_emit(CP_VA_SCRATCH + g10_depth_ts_off);
++	cp_emit(0);
++	cp_emit(0);
++	cp_emit(pm4_pkt7(GPU_CP_EVENT_WRITE, 4));
++	cp_emit(GPU_CP_CACHE_FLUSH_TS | (1u << 30)); /* CACHE_FLUSH_TS | TIMESTAMP */
++	cp_emit(CP_VA_SCRATCH + g10_cache_ts_off);
++	cp_emit(0);
++	cp_emit(0);
++	cp_emit(pm4_pkt7(38u, 0)); /* CP_WAIT_FOR_IDLE */
++
++	to_memory(cp_block_kva + CP_BLK_RING, 1024);
++	cp_wr(core, A6XX_CP_RB_WPTR, cp_wptr);
++	printf("SWEET GPU: G10 submitted 2D blit (ring %u -> %u, %u dwords)\n",
++	    g10_pre, cp_wptr, (cp_wptr - g10_pre) & ((CP_RING_BYTES / 4u) - 1u));
++	bool g10_drained = cp_wait_idle(core, "G10 2D blit");
++	if (!g10_drained) {
++		printf("SWEET GPU: G10 CP did not drain; skipping CPU pixel readback\n");
++		return;
++	}
++	for (vm_offset_t line = cp_block_kva + CP_BLK_SCRATCH;
++	    line < cp_block_kva + CP_BLK_SCRATCH + PAGE_SIZE; line += 64) {
++		__asm__ volatile ("dc ivac, %0" : : "r" (line) : "memory");
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	uint32_t g10_match = 0;
++	for (uint32_t i = 0; i < g10_width; i++) {
++		if (g10_dst[i] == g10_expected[i]) { g10_match++; }
++	}
++	printf("SWEET GPU: G10 CCU timestamps color=0x%08x depth=0x%08x cache=0x%08x\n",
++	    *g10_color_ts, *g10_depth_ts, *g10_cache_ts);
++	printf("SWEET GPU: G10 destination matched %u/%u bytes\n", g10_match, g10_width);
++	if (g10_drained && g10_match == g10_width) {
++		printf("SWEET GPU: G10 ***** ADRENO 618 EXECUTED A REAL 2D BLIT - PIXELS VERIFIED *****\n");
++	} else {
++		printf("SWEET GPU: G10 2D blit did not verify (drained=%d, matched=%u/%u)\n",
++		    g10_drained, g10_match, g10_width);
+ 	}
+ }

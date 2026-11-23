@@ -1,0 +1,57 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -3412,19 +3412,37 @@
+ 	}
+
+-	/* Load the A618-specific static registers from Mesa's a6xx device table.
+-	 * These are the graphics-block baseline omitted by the CP-only G6/G7 path. */
+-	cp_wr(core, 0x9804u, 0x0000001fu); /* PC_MODE_CNTL */
+-	cp_wr(core, 0x9805u, 0x00000000u); /* PC_POWER_CNTL */
+-	cp_wr(core, 0xa0f8u, 0x00000000u); /* VFD_POWER_CNTL */
+-	cp_wr(core, 0xb600u, 0x00108000u); /* TPL1_DBG_ECO_CNTL */
+-	cp_wr(core, 0x8600u, 0x00000880u); /* GRAS_DBG_ECO_CNTL */
+-	cp_wr(core, 0xae03u, 0x00000430u); /* SP_CHICKEN_BITS */
+-	cp_wr(core, 0xae00u, 0x00000000u); /* SP_DBG_ECO_CNTL */
+-	cp_wr(core, 0xbe04u, 0x00080000u); /* HLSQ_DBG_ECO_CNTL */
+-	cp_wr(core, 0x9600u, 0x00000000u); /* VPC_DBG_ECO_CNTL */
+-	cp_wr(core, 0x0e12u, 0x00000001u); /* UCHE_UNKNOWN_0E12 */
+-	cp_wr(core, 0x8e01u, 0x00000001u); /* RB_RBP_CNTL */
+-	cp_wr(core, 0x8e04u, 0x04100000u); /* RB_DBG_ECO_CNTL */
+-	__asm__ volatile ("dsb sy" ::: "memory");
++	/* 0161: G10 entry marker. 0160 produced no G10 output in the runtime log
++	 * even though its first printf came right after 12 direct MMIO writes to
++	 * 3D-block registers (PC, GRAS, SP, HLSQ, VPC, RB, VFD, TPL1). On a6xx,
++	 * these blocks only accept writes via CP_REG_WRITE (PM4 pkt4) packets;
++	 * a CPU-side MMIO write there silently drops or AHB-faults, which is what
++	 * swallowed the printf. Switch to pkt4 emits and ring once at the end. */
++	printf("SWEET GPU: G10 entry - about to emit pkt4 static state (via CP, not MMIO)\n");
++
++	/* Enqueue A618 static state as CP_REG_WRITE (pm4 pkt4) packets. The CP's
++	 * internal register bus writes the 3D blocks for us. Values from Mesa's
++	 * a6xx device table. */
++	uint32_t g10_pre_ss = cp_wptr;
++	cp_emit_pkt4_one(0x9804u, 0x0000001fu); /* PC_MODE_CNTL */
++	cp_emit_pkt4_one(0x9805u, 0x00000000u); /* PC_POWER_CNTL */
++	cp_emit_pkt4_one(0xa0f8u, 0x00000000u); /* VFD_POWER_CNTL */
++	cp_emit_pkt4_one(0xb600u, 0x00108000u); /* TPL1_DBG_ECO_CNTL */
++	cp_emit_pkt4_one(0x8600u, 0x00000880u); /* GRAS_DBG_ECO_CNTL */
++	cp_emit_pkt4_one(0xae03u, 0x00000430u); /* SP_CHICKEN_BITS */
++	cp_emit_pkt4_one(0xae00u, 0x00000000u); /* SP_DBG_ECO_CNTL */
++	cp_emit_pkt4_one(0xbe04u, 0x00080000u); /* HLSQ_DBG_ECO_CNTL */
++	cp_emit_pkt4_one(0x9600u, 0x00000000u); /* VPC_DBG_ECO_CNTL */
++	cp_emit_pkt4_one(0x0e12u, 0x00000001u); /* UCHE_UNKNOWN_0E12 */
++	cp_emit_pkt4_one(0x8e01u, 0x00000001u); /* RB_RBP_CNTL */
++	cp_emit_pkt4_one(0x8e04u, 0x04100000u); /* RB_DBG_ECO_CNTL */
++	to_memory(cp_block_kva + CP_BLK_RING, 256);
++	cp_wr(core, A6XX_CP_RB_WPTR, cp_wptr);
++	printf("SWEET GPU: G10 emitted 12 pkt4 static-state registers (ring %u -> %u)\n", g10_pre_ss, cp_wptr);
++	if (!cp_wait_idle(core, "G10 static state")) {
++		printf("SWEET GPU: G10 static state did not drain; skipping readback and blit\n");
++		return;
++	}
++	/* Readbacks via MMIO: reading a 3D block is usually safe (returns stale
++	 * value if the block gates it) and tells us the CP write actually took. */
+ 	printf("SWEET GPU: G10 A618 static state PC_MODE=0x%x TPL1=0x%x GRAS=0x%x SP_CHICKEN=0x%x HLSQ=0x%x\n",
+ 	    cp_rd(core, 0x9804u), cp_rd(core, 0xb600u), cp_rd(core, 0x8600u),
+ 	    cp_rd(core, 0xae03u), cp_rd(core, 0xbe04u));
